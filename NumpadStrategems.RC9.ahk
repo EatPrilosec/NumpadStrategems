@@ -215,6 +215,16 @@ DoAutoClose() {
 ; grab https://steamcommunity.com/sharedfiles/filedetails/?id=3161075951 and save as StrategmsRaw.html in the same folder as this script if its more than a week old
 wasDownloaded := GrabHtml()
 
+; Always ensure placeholder images exist
+try {
+    iconProgress.Text := "Placeholder Generation: Creating images..."
+    global placeholderImagePath := CreatePlaceholderImage()
+    iconProgress.Text := "Placeholder Generation: Complete"
+} catch Error as err {
+    iconProgress.Text := "Placeholder Generation: ERROR - " err.What
+    downloadProgress.Text := "Line: " err.Extra
+}
+
 if (wasDownloaded || !FileExist(appDataDir "\Strategems.ini")) {
     ; parse the html and download icons
     ; Stop any pending auto-close timer during operations
@@ -226,16 +236,6 @@ if (wasDownloaded || !FileExist(appDataDir "\Strategems.ini")) {
     
     try {
         ParseStrategems()
-        
-        ; Create placeholder images for buttons during initialization
-        try {
-            iconProgress.Text := "Placeholder Generation: Creating images..."
-            global placeholderImagePath := CreatePlaceholderImage()
-            iconProgress.Text := "Placeholder Generation: Complete"
-        } catch Error as err {
-            iconProgress.Text := "Placeholder Generation: ERROR - " err.What
-            downloadProgress.Text := "Line: " err.Extra
-        }
         
         ; Check if all icons are already organized in color folders
         if (!AllIconsOrganized()) {
@@ -1232,17 +1232,31 @@ CreatePlaceholderImage() {
     }
     
     local placeholderPath := iconDir "\placeholder.png"
-    
-    ; Create standard 50x50 placeholder
+    local placeholderWide := iconDir "\placeholder_wide.png"
+    local placeholderTall := iconDir "\placeholder_tall.png"
+
+    local repoBase := "https://raw.githubusercontent.com/EatPrilosec/NumpadStrategems/master"
+
+    ; Create standard 50x50 placeholder (fallback to repo download if generation fails)
     if (!FileExist(placeholderPath)) {
-        CreatePlaceholderWithSize(50, 50, placeholderPath)
+        if (!CreatePlaceholderWithSize(50, 50, placeholderPath)) {
+            URLDownloadToFile(repoBase "/placeholder.png", placeholderPath)
+        }
     }
     
     ; Create wide 105x50 placeholder for 0 button
-    CreatePlaceholderWithSize(105, 50, iconDir "\placeholder_wide.png")
+    if (!FileExist(placeholderWide)) {
+        if (!CreatePlaceholderWithSize(105, 50, placeholderWide)) {
+            URLDownloadToFile(repoBase "/placeholder_wide.png", placeholderWide)
+        }
+    }
     
     ; Create tall 50x104 placeholder for + and Enter buttons
-    CreatePlaceholderWithSize(50, 104, iconDir "\placeholder_tall.png")
+    if (!FileExist(placeholderTall)) {
+        if (!CreatePlaceholderWithSize(50, 104, placeholderTall)) {
+            URLDownloadToFile(repoBase "/placeholder_tall.png", placeholderTall)
+        }
+    }
     
     return placeholderPath
 }
