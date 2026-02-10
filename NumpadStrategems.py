@@ -1088,9 +1088,8 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Stratagem Numpad")
         self.setStyleSheet(f"background-color: {DARK_BG}; color: white;")
 
-        # Try to set window icon (use PNG on Linux for Wayland, ICO on Windows)
-        icon_file = "Resupply.png" if platform.system() == "Linux" else "Resupply.ico"
-        ico = Path(__file__).parent / icon_file
+        # Try to set window icon
+        ico = Path(__file__).parent / "Resupply.png"
         if ico.exists():
             self.setWindowIcon(QIcon(str(ico)))
 
@@ -1666,9 +1665,8 @@ class App:
         palette.setColor(QPalette.ColorRole.HighlightedText, QColor("black"))
         self.qt_app.setPalette(palette)
 
-        # Set window icon globally (use PNG on Linux for Wayland, ICO on Windows)
-        icon_file = "Resupply.png" if platform.system() == "Linux" else "Resupply.ico"
-        ico = Path(__file__).parent / icon_file
+        # Set window icon globally
+        ico = Path(__file__).parent / "Resupply.png"
         if ico.exists():
             self.qt_app.setWindowIcon(QIcon(str(ico)))
 
