@@ -1663,9 +1663,14 @@ class Updater:
         """Fetch latest release info from GitHub API."""
         try:
             url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
-            with urllib.request.urlopen(url, timeout=5) as response:
-                return json.loads(response.read().decode())
-        except Exception:
+            print(f"[updater] Fetching: {url}")
+            req = urllib.request.Request(url, headers={"User-Agent": "NumpadStrategems-Updater"})
+            with urllib.request.urlopen(req, timeout=10) as response:
+                data = json.loads(response.read().decode())
+                print(f"[updater] Got release: {data.get('tag_name', '???')}")
+                return data
+        except Exception as e:
+            print(f"[updater] Failed to fetch release: {e}")
             return None
     
     @staticmethod
@@ -1681,18 +1686,26 @@ class Updater:
     @staticmethod
     def should_update(current_ver: str, latest_ver: str) -> bool:
         """Check if update is available."""
-        return Updater.parse_version(latest_ver) > Updater.parse_version(current_ver)
+        current = Updater.parse_version(current_ver)
+        latest = Updater.parse_version(latest_ver)
+        result = latest > current
+        print(f"[updater] Current: {current_ver} ({current}) | Latest: {latest_ver} ({latest}) | Update needed: {result}")
+        return result
     
     @staticmethod
     def get_platform_asset(release: Dict) -> Optional[Dict]:
         """Find the asset for current platform."""
         system = platform.system()
         platform_str = "Windows" if system == "Windows" else "Linux"
-        ext = ".exe" if system == "Windows" else ""
+        print(f"[updater] Looking for platform asset: {platform_str}")
         
         for asset in release.get("assets", []):
-            if platform_str in asset["name"] and asset["name"].endswith(ext or ""):
+            name = asset["name"]
+            print(f"[updater]   Asset: {name}")
+            if platform_str in name:
+                print(f"[updater]   -> Match!")
                 return asset
+        print("[updater] No matching asset found")
         return None
     
     @staticmethod
@@ -1811,15 +1824,19 @@ class App:
     
     def _check_for_updates_blocking(self):
         """Check GitHub for updates during startup before init window shown."""
+        print(f"[updater] Starting update check (VERSION={VERSION}, frozen={getattr(sys, 'frozen', False)})")
         try:
             release = Updater.get_latest_release()
             if not release:
+                print("[updater] No release info returned, skipping update check")
                 return
             
             latest_version = release.get("tag_name", "")
             if not Updater.should_update(VERSION, latest_version):
+                print("[updater] Already up to date")
                 return
             
+            print(f"[updater] Update available: {latest_version}")
             # Found an update - show dialog
             from PyQt6.QtWidgets import QMessageBox
             msg = QMessageBox()
@@ -1832,19 +1849,27 @@ class App:
             if msg.exec() == QMessageBox.StandardButton.Yes:
                 asset = Updater.get_platform_asset(release)
                 if asset:
+                    print(f"[updater] Downloading: {asset['browser_download_url']}")
                     if Updater.download_and_replace(asset, latest_version):
                         # Update successful - show info and exit
                         QMessageBox.information(
                             None,
                             "Update Complete",
-                            f"Update to {latest_version} installed!\\n\\n"
+                            f"Update to {latest_version} installed!\n\n"
                             "Please run the new binary to continue."
                         )
                         sys.exit(0)
+                    else:
+                        print("[updater] download_and_replace returned False")
                 else:
+                    print("[updater] No platform asset found")
                     QMessageBox.warning(None, "Update Failed", "Could not find binary for your platform.")
+            else:
+                print("[updater] User declined update")
         except Exception as e:
-            print(f"Update check error: {e}")
+            import traceback
+            print(f"[updater] Update check error: {e}")
+            traceback.print_exc()
 
 
 # ─── Entry point ────────────────────────────────────────────────────────────
