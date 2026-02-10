@@ -13,12 +13,12 @@ pip install pyinstaller
 
 ### On Linux:
 ```bash
-python build_binary.py
+python build_binary.py --version 0.0.2
 ```
 
 ### On Windows:
 ```cmd
-python build_binary.py
+python build_binary.py --version 0.0.2
 ```
 
 The binary will be created in the `dist/` folder.
@@ -68,7 +68,8 @@ pyinstaller --onefile ^
 ## Build Output
 
 After building, you'll find:
-- **dist/NumpadStrategems** (Linux) or **dist/NumpadStrategems.exe** (Windows)
+- **dist/NumpadStrategems-<version>-Linux** (Linux)
+- **dist/NumpadStrategems-<version>-Windows.exe** (Windows)
 - This is your standalone portable binary!
 - The `build/` folder contains temporary build files (can be deleted)
 - The `.spec` file can be used for reproducible builds
@@ -77,12 +78,12 @@ After building, you'll find:
 
 ### Linux:
 ```bash
-./dist/NumpadStrategems
+./dist/NumpadStrategems-0.0.2-Linux
 ```
 
 ### Windows:
 ```cmd
-dist\NumpadStrategems.exe
+dist\NumpadStrategems-0.0.2-Windows.exe
 ```
 
 ## Important Notes
@@ -95,13 +96,7 @@ dist\NumpadStrategems.exe
 
 3. **Binary size**: The binaries will be 40-80MB due to bundled Python interpreter and Qt libraries
 
-4. **Linux permissions**: On Linux, the binary needs access to input devices:
-   ```bash
-   sudo usermod -aG input $USER
-   # Log out and back in for this to take effect
-   ```
-
-5. **UPX compression** (optional): To reduce binary size, install UPX:
+4. **UPX compression** (optional): To reduce binary size, install UPX:
    - Linux: `sudo apt install upx` or `sudo pacman -S upx`
    - Windows: Download from https://upx.github.io/
    - PyInstaller will automatically use UPX if available
