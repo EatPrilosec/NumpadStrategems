@@ -16,7 +16,7 @@ a = Analysis(
     ['NumpadStrategems.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[('Resupply.png', '.')],
     hiddenimports=[
         'PyQt6.QtCore',
         'PyQt6.QtGui', 
@@ -59,5 +59,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='Resupply.png',
+    icon='Resupply.png' if system == 'Windows' else None,
 )

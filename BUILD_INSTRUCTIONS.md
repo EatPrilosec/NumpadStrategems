@@ -41,7 +41,8 @@ pyinstaller NumpadStrategems.spec
 ```bash
 pyinstaller --onefile \
     --name=NumpadStrategems \
-    --icon=Resupply.ico \
+    --icon=Resupply.png \
+    --add-data="Resupply.png:." \
     --hidden-import=PyQt6.QtCore \
     --hidden-import=PyQt6.QtGui \
     --hidden-import=PyQt6.QtWidgets \
@@ -56,7 +57,8 @@ pyinstaller --onefile \
 pyinstaller --onefile ^
     --windowed ^
     --name=NumpadStrategems ^
-    --icon=Resupply.ico ^
+    --icon=Resupply.png ^
+    --add-data="Resupply.png:." ^
     --hidden-import=PyQt6.QtCore ^
     --hidden-import=PyQt6.QtGui ^
     --hidden-import=PyQt6.QtWidgets ^

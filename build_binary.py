@@ -41,7 +41,12 @@ def build_binary(version: str | None):
         '--onefile',  # Single executable
         '--windowed' if system == 'Windows' else '',  # No console on Windows
         '--name=NumpadStrategems',
-        '--icon=Resupply.png',  # Application icon
+        '--add-data=Resupply.png:.',  # Bundle icon as data for access at runtime
+    ]
+    
+    # Only use --icon on Windows (PyInstaller on Linux doesn't support PNG icons)
+    if system == 'Windows':
+        args.insert(4, '--icon=Resupply.png')
         '--hidden-import=PyQt6.QtCore',
         '--hidden-import=PyQt6.QtGui',
         '--hidden-import=PyQt6.QtWidgets',
