@@ -36,17 +36,15 @@ def build_binary(version: str | None):
     version_str = _get_version_string(version)
     platform_str = _platform_label(system)
     
+    # Build path separator for --add-data (Windows uses ;, Linux uses :)
+    add_data_sep = ';' if system == 'Windows' else ':'
+    
     args = [
         'NumpadStrategems.py',
         '--onefile',  # Single executable
         '--windowed' if system == 'Windows' else '',  # No console on Windows
         '--name=NumpadStrategems',
-        '--add-data=Resupply.png:.',  # Bundle icon as data for access at runtime
-    ]
-    
-    # Only use --icon on Windows (PyInstaller on Linux doesn't support PNG icons)
-    if system == 'Windows':
-        args.insert(4, '--icon=Resupply.png')
+        f'--add-data=Resupply.png{add_data_sep}.',  # Bundle icon as data
         '--hidden-import=PyQt6.QtCore',
         '--hidden-import=PyQt6.QtGui',
         '--hidden-import=PyQt6.QtWidgets',
@@ -55,6 +53,10 @@ def build_binary(version: str | None):
         '--hidden-import=pynput.mouse',
         '--collect-all=PyQt6',
     ]
+    
+    # Only use --icon on Windows (PyInstaller on Linux doesn't support PNG icons)
+    if system == 'Windows':
+        args.insert(4, '--icon=Resupply.png')
     
     # Add Linux-specific imports
     if system == 'Linux':
