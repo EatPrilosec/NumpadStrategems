@@ -1,3 +1,6 @@
 old/
 rc7_error_output.txt
 *.log
+build/
+dist/
+.spec
