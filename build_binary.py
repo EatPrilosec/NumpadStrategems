@@ -54,10 +54,6 @@ def build_binary(version: str | None):
         '--collect-all=PyQt6',
     ]
     
-    # Only use --icon on Windows (PyInstaller on Linux doesn't support PNG icons)
-    if system == 'Windows':
-        args.insert(4, '--icon=Resupply.png')
-    
     # Add Linux-specific imports
     if system == 'Linux':
         args.extend([
