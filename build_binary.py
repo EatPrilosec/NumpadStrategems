@@ -36,12 +36,15 @@ def build_binary(version: str | None):
     version_str = _get_version_string(version)
     platform_str = _platform_label(system)
     
+    # Use PNG icon on Linux (better Wayland support), ICO on Windows
+    icon_file = 'Resupply.png' if system == 'Linux' else 'Resupply.ico'
+    
     args = [
         'NumpadStrategems.py',
         '--onefile',  # Single executable
         '--windowed' if system == 'Windows' else '',  # No console on Windows
         '--name=NumpadStrategems',
-        '--icon=Resupply.ico',  # Application icon
+        f'--icon={icon_file}',  # Application icon
         '--hidden-import=PyQt6.QtCore',
         '--hidden-import=PyQt6.QtGui',
         '--hidden-import=PyQt6.QtWidgets',

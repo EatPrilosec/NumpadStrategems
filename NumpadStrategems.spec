@@ -7,10 +7,12 @@ Usage:
     pyinstaller NumpadStrategems.spec
 """
 
+import os
 import platform
 
 block_cipher = None
 system = platform.system()
+icon_file = 'Resupply.png' if system == 'Linux' else 'Resupply.ico'
 
 a = Analysis(
     ['NumpadStrategems.py'],
@@ -59,5 +61,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='Resupply.ico',
+    icon=icon_file,
 )
