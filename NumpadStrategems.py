@@ -1696,30 +1696,38 @@ class Updater:
         return None
     
     @staticmethod
-    def download_and_replace(asset: Dict) -> bool:
-        """Download new binary and replace current executable."""
+    def download_and_replace(asset: Dict, new_version: str) -> bool:
+        """Download new binary with version in filename, delete old binary."""
         try:
             current_exe = os.path.abspath(sys.executable if getattr(sys, 'frozen', False) else __file__)
             if not os.path.exists(current_exe):
                 print(f"Current executable not found: {current_exe}")
                 return False
             
-            # Download to temp file
+            # Determine new filename with version
+            system = platform.system()
+            platform_str = "Windows" if system == "Windows" else "Linux"
+            ext = ".exe" if system == "Windows" else ""
+            new_filename = f"NumpadStrategems-{new_version.lstrip('v')}-{platform_str}{ext}"
+            new_exe_path = os.path.join(os.path.dirname(current_exe), new_filename)
+            
+            # Download to new versioned filename
             download_url = asset["browser_download_url"]
-            with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(current_exe)[1]) as tmp:
-                tmp_path = tmp.name
+            with open(new_exe_path, 'wb') as f:
                 with urllib.request.urlopen(download_url, timeout=30) as response:
-                    tmp.write(response.read())
+                    f.write(response.read())
             
             # Make executable on Linux
             if platform.system() == "Linux":
-                os.chmod(tmp_path, 0o755)
+                os.chmod(new_exe_path, 0o755)
             
-            # Replace current binary
-            backup_path = current_exe + ".bak"
-            shutil.copy2(current_exe, backup_path)
-            shutil.move(tmp_path, current_exe)
-            print("Update installed! Restart the app to use the new version.")
+            # Delete old binary
+            try:
+                os.remove(current_exe)
+            except Exception as e:
+                print(f"Could not remove old binary: {e}")
+            
+            print(f"Update installed to: {new_exe_path}")
             return True
             
         except Exception as e:
@@ -1763,6 +1771,9 @@ class App:
         self.hotkey_mgr: Optional[HotkeyManager] = None
 
     def run(self):
+        # Check for updates BEFORE showing init window
+        self._check_for_updates_blocking()
+        
         # Show status window
         self.status_win = StatusWindow(self.settings)
         self.status_win.dismissed.connect(self._on_status_dismissed)
@@ -1797,12 +1808,9 @@ class App:
         # Wire up the settings bridge properly now that main_win exists
         self.hotkey_mgr.get_settings = self.main_win.get_hotkey_settings
         self.main_win.show()
-        
-        # Check for updates in background
-        threading.Thread(target=self._check_for_updates, daemon=True).start()
     
-    def _check_for_updates(self):
-        """Check GitHub for new releases and prompt user if available."""
+    def _check_for_updates_blocking(self):
+        """Check GitHub for updates during startup before init window shown."""
         try:
             release = Updater.get_latest_release()
             if not release:
@@ -1812,28 +1820,29 @@ class App:
             if not Updater.should_update(VERSION, latest_version):
                 return
             
-            # Found an update - show dialog on main thread
+            # Found an update - show dialog
             from PyQt6.QtWidgets import QMessageBox
-            msg = QMessageBox(self.main_win)
+            msg = QMessageBox()
             msg.setIcon(QMessageBox.Icon.Information)
             msg.setWindowTitle("Update Available")
             msg.setText(f"NumpadStrategems {latest_version} is available.")
-            msg.setInformativeText("Would you like to update?")
+            msg.setInformativeText("Would you like to update now?")
             msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
             
             if msg.exec() == QMessageBox.StandardButton.Yes:
                 asset = Updater.get_platform_asset(release)
                 if asset:
-                    if Updater.download_and_replace(asset):
-                        # Show success and close app
+                    if Updater.download_and_replace(asset, latest_version):
+                        # Update successful - show info and exit
                         QMessageBox.information(
-                            self.main_win,
+                            None,
                             "Update Complete",
-                            "Update installed! Please restart the application."
+                            f"Update to {latest_version} installed!\\n\\n"
+                            "Please run the new binary to continue."
                         )
-                        self.main_win.close()
+                        sys.exit(0)
                 else:
-                    QMessageBox.warning(self.main_win, "Update Failed", "Could not find binary for your platform.")
+                    QMessageBox.warning(None, "Update Failed", "Could not find binary for your platform.")
         except Exception as e:
             print(f"Update check error: {e}")
 
