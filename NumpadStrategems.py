@@ -36,7 +36,7 @@ from dataclasses import dataclass, field
 from typing import Optional, Dict, List, Tuple
 
 # Version
-VERSION = "0.1.4"
+VERSION = "0.1.5"
 GITHUB_REPO = "EatPrilosec/NumpadStrategems"
 
 # ─── Third-party imports ────────────────────────────────────────────────────
@@ -1106,6 +1106,8 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._load_assignments()
         self.hotkey_mgr.start()
+        # Update input status after hotkey manager starts (evdev may grab devices asynchronously)
+        QTimer.singleShot(250, self._update_input_status)
 
         # Restore position
         x = settings.get("GUI", "NumpadX")
@@ -1277,9 +1279,48 @@ class MainWindow(QMainWindow):
         right.addLayout(self.arrow_container)
 
         right.addStretch()
+        # Add app version and input status label at the bottom, right-aligned
+        self.version_label = QLabel(f"v{VERSION}")
+        self.version_label.setFont(QFont("Segoe UI", 9))
+        self.version_label.setStyleSheet("color: #aaa; padding: 2px;")
+        self.version_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom)
+        self.input_status_label = QLabel()
+        self.input_status_label.setFont(QFont("Segoe UI", 9))
+        self.input_status_label.setStyleSheet("color: #aaa; padding: 2px;")
+        self.input_status_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom)
+        status_row = QHBoxLayout()
+        status_row.addStretch()
+        status_row.addWidget(self.version_label)
+        status_row.addWidget(self.input_status_label)
+        right.addLayout(status_row)
+        self._update_input_status()
 
         # ── Populate strategem grid ──
         self._populate_grid()
+    def _update_input_status(self):
+        # Determine backend and status
+        status = ""
+        mgr = self.hotkey_mgr
+        status = None
+        evdev_available = False
+        pynput_available = False
+        if platform.system() == "Linux" and hasattr(mgr, "_ev_devices"):
+            if mgr._ev_devices and len(mgr._ev_devices) > 0:
+                status = f"evdev: grabbed {len(mgr._ev_devices)} device(s)"
+                evdev_available = True
+            else:
+                evdev_available = False
+        if hasattr(mgr, "_pynput_listener"):
+            if mgr._pynput_listener:
+                status = "pynput: active"
+                pynput_available = True
+            else:
+                pynput_available = False
+        if not evdev_available and not pynput_available:
+            status = "failed to grab any devices"
+        if status is None:
+            status = "No hotkey backend"
+        self.input_status_label.setText(status)
 
         # ── Size the window to fit all content ──
         self.adjustSize()
