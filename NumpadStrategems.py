@@ -25,6 +25,7 @@ import subprocess
 import selectors
 import hashlib
 import json
+import ssl
 import urllib.request
 import urllib.error
 import tempfile
@@ -34,7 +35,7 @@ from dataclasses import dataclass, field
 from typing import Optional, Dict, List, Tuple
 
 # Version
-VERSION = "0.1.5"
+VERSION = "0.1.3"
 GITHUB_REPO = "EatPrilosec/NumpadStrategems"
 
 # ─── Third-party imports ────────────────────────────────────────────────────
@@ -1659,13 +1660,50 @@ class Updater:
     """Check GitHub for new releases and update the binary."""
     
     @staticmethod
+    def _get_ssl_context() -> ssl.SSLContext:
+        """Get an SSL context that works in PyInstaller bundles."""
+        # Try default context first
+        ctx = ssl.create_default_context()
+        # Try certifi if available (bundled or installed)
+        try:
+            import certifi
+            ctx.load_verify_locations(certifi.where())
+            print("[updater] Using certifi CA bundle")
+            return ctx
+        except (ImportError, Exception):
+            pass
+        # Try common system CA paths
+        ca_paths = [
+            "/etc/ssl/certs/ca-certificates.crt",       # Debian/Ubuntu
+            "/etc/pki/tls/certs/ca-bundle.crt",         # RHEL/Fedora
+            "/etc/ssl/ca-bundle.pem",                   # openSUSE
+            "/etc/ssl/cert.pem",                        # macOS/Alpine
+            "/usr/local/share/certs/ca-root-nss.crt",   # FreeBSD
+        ]
+        for ca in ca_paths:
+            if os.path.exists(ca):
+                try:
+                    ctx.load_verify_locations(ca)
+                    print(f"[updater] Using system CA: {ca}")
+                    return ctx
+                except Exception:
+                    continue
+        # Last resort: disable verification (still HTTPS, just no cert check)
+        print("[updater] WARNING: No CA certs found, disabling SSL verification")
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        return ctx
+    
+    @staticmethod
     def get_latest_release() -> Optional[Dict]:
         """Fetch latest release info from GitHub API."""
         try:
             url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
             print(f"[updater] Fetching: {url}")
+            ctx = Updater._get_ssl_context()
             req = urllib.request.Request(url, headers={"User-Agent": "NumpadStrategems-Updater"})
-            with urllib.request.urlopen(req, timeout=10) as response:
+            with urllib.request.urlopen(req, timeout=10, context=ctx) as response:
                 data = json.loads(response.read().decode())
                 print(f"[updater] Got release: {data.get('tag_name', '???')}")
                 return data
@@ -1726,8 +1764,10 @@ class Updater:
             
             # Download to new versioned filename
             download_url = asset["browser_download_url"]
+            print(f"[updater] Downloading to: {new_exe_path}")
+            ctx = Updater._get_ssl_context()
             with open(new_exe_path, 'wb') as f:
-                with urllib.request.urlopen(download_url, timeout=30) as response:
+                with urllib.request.urlopen(download_url, timeout=30, context=ctx) as response:
                     f.write(response.read())
             
             # Make executable on Linux
