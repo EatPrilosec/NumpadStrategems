@@ -14,6 +14,7 @@ You may need to be in the 'input' group for key listening:
 
 import sys
 import os
+os.environ["QT_LOGGING_RULES"] = "qt.gui.imageio=false"
 import re
 import time
 import html as html_module
@@ -35,7 +36,7 @@ from dataclasses import dataclass, field
 from typing import Optional, Dict, List, Tuple
 
 # Version
-VERSION = "0.1.5"
+VERSION = "0.1.4"
 GITHUB_REPO = "EatPrilosec/NumpadStrategems"
 
 # ─── Third-party imports ────────────────────────────────────────────────────
