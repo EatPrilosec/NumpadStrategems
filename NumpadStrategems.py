@@ -23,6 +23,7 @@ import shutil
 import threading
 import subprocess
 import selectors
+import hashlib
 from pathlib import Path
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field
@@ -659,7 +660,7 @@ class HotkeyManager:
 
     def __init__(self, db: StrategemDB, get_settings_fn):
         self.db = db
-        self.get_settings = get_settings_fn  # returns (arrow_keys: bool, delay_ms: int)
+        self.get_settings = get_settings_fn  # returns (arrow_keys: bool, delay_ms: int, release_ctrl: bool)
         self.ctrl_pressed = False
         self._executing = False
         self._running = False
@@ -670,10 +671,12 @@ class HotkeyManager:
         self._ev_lock = threading.Lock()
         self._ev_thread = None
         self._ev_selector = None
+        self._ev_ctrl_down = set()
 
         # pynput state (Windows)
         self._pynput_listener = None
         self._pynput_controller = None
+        self._pynput_ctrl_down = set()
 
     def start(self):
         self._running = True
@@ -754,14 +757,9 @@ class HotkeyManager:
 
         except PermissionError:
             print("Permission denied accessing input devices.")
-            print("Run the following to fix permissions (one-time setup):")
-            print("  sudo groupadd -f input")
-            print(f"  sudo usermod -aG input {os.environ.get('USER', '$USER')}")
-            print("  echo 'KERNEL==\"event*\", SUBSYSTEM==\"input\", "
-                  "GROUP=\"input\", MODE=\"0660\"' "
-                  "| sudo tee /etc/udev/rules.d/99-input.rules")
-            print("  sudo udevadm control --reload-rules && sudo udevadm trigger")
-            print("Then log out and back in.")
+            print("The application needs elevated privileges to capture global hotkeys on Linux.")
+            print("\nRestart the application and grant permission when prompted,")
+            print("OR run with: pkexec python NumpadStrategems.py")
             return False
         except Exception as e:
             print(f"evdev init error: {e}")
@@ -795,7 +793,11 @@ class HotkeyManager:
         if event.type == ec.EV_KEY:
             # Track Ctrl state
             if event.code in _EV_CTRL_CODES:
-                self.ctrl_pressed = (event.value != 0)  # 1=down, 2=repeat, 0=up
+                if event.value != 0:
+                    self._ev_ctrl_down.add(event.code)
+                else:
+                    self._ev_ctrl_down.discard(event.code)
+                self.ctrl_pressed = bool(self._ev_ctrl_down)
 
             # Intercept ALL Ctrl+Numpad events (down, repeat, release)
             elif self.ctrl_pressed and event.code in _EV_NUMPAD_MAP:
@@ -855,6 +857,7 @@ class HotkeyManager:
     def _pynput_on_press(self, key):
         if key in (PynputKey.ctrl_l, PynputKey.ctrl_r):
             self.ctrl_pressed = True
+            self._pynput_ctrl_down.add(key)
             return
         if not self.ctrl_pressed:
             return
@@ -867,6 +870,24 @@ class HotkeyManager:
 
     def _pynput_on_release(self, key):
         if key in (PynputKey.ctrl_l, PynputKey.ctrl_r):
+            self._pynput_ctrl_down.discard(key)
+            self.ctrl_pressed = bool(self._pynput_ctrl_down)
+
+    def _release_ctrl_modifiers(self):
+        if self._ev_uinput and self._ev_ctrl_down:
+            with self._ev_lock:
+                for code in list(self._ev_ctrl_down):
+                    self._ev_uinput.write(ec.EV_KEY, code, 0)
+                self._ev_uinput.syn()
+            self._ev_ctrl_down.clear()
+            self.ctrl_pressed = False
+        elif self._pynput_controller and self._pynput_ctrl_down:
+            for key in list(self._pynput_ctrl_down):
+                try:
+                    self._pynput_controller.release(key)
+                except Exception:
+                    pass
+            self._pynput_ctrl_down.clear()
             self.ctrl_pressed = False
 
     # ─── Shared trigger / execute logic ─────────────────────────────────
@@ -885,15 +906,19 @@ class HotkeyManager:
         t.start()
 
     def _execute(self, code: str):
+        release_ctrl = False  # Default in case of early exception
         try:
-            arrow_keys, delay_ms = self.get_settings()
+            arrow_keys, delay_ms, release_ctrl = self.get_settings()
             delay = delay_ms / 1000.0
+
+            if release_ctrl:
+                self._release_ctrl_modifiers()
 
             if self._ev_uinput:
                 # ── evdev output ──
                 key_map = _EV_ARROW_KEYS if arrow_keys else _EV_WASD_KEYS
                 for ch in code:
-                    if not self.ctrl_pressed:
+                    if not self.ctrl_pressed and not release_ctrl:
                         return
                     keycode = key_map.get(ch)
                     if keycode is None:
@@ -911,7 +936,7 @@ class HotkeyManager:
                 # ── pynput output ──
                 key_map = _ARROW_KEYS if arrow_keys else _WASD_KEYS
                 for ch in code:
-                    if not self.ctrl_pressed:
+                    if not self.ctrl_pressed and not release_ctrl:
                         return
                     k = key_map.get(ch)
                     if k is None:
@@ -1200,6 +1225,15 @@ class MainWindow(QMainWindow):
             lambda v: self.settings.set("Numpad", "ArrowKeys", int(v))
         )
         right.addWidget(self.arrow_keys_cb)
+
+        self.release_ctrl_cb = QCheckBox("Release Ctrl Before Input")
+        self.release_ctrl_cb.setFont(QFont("Segoe UI", 10))
+        self.release_ctrl_cb.setStyleSheet("color: white;")
+        self.release_ctrl_cb.setChecked(self.settings.getbool("Numpad", "ReleaseCtrl", False))
+        self.release_ctrl_cb.toggled.connect(
+            lambda v: self.settings.set("Numpad", "ReleaseCtrl", int(v))
+        )
+        right.addWidget(self.release_ctrl_cb)
 
         # ── Hover info display ──
         right.addSpacing(10)
@@ -1571,8 +1605,8 @@ class MainWindow(QMainWindow):
 
     # ── Settings bridge for hotkey manager ──
 
-    def get_hotkey_settings(self) -> Tuple[bool, int]:
-        return (self.arrow_keys_cb.isChecked(), int(self.delay_display.text()))
+    def get_hotkey_settings(self) -> Tuple[bool, int, bool]:
+        return (self.arrow_keys_cb.isChecked(), int(self.delay_display.text()), self.release_ctrl_cb.isChecked())
 
     # ── Secret code ──
 
@@ -1674,7 +1708,7 @@ class App:
 
     def _show_main(self):
         self.db.reload()
-        self.hotkey_mgr = HotkeyManager(self.db, lambda: (False, 67))
+        self.hotkey_mgr = HotkeyManager(self.db, lambda: (False, 67, False))
         self.main_win = MainWindow(
             self.data_dir, self.settings, self.db, self.hotkey_mgr
         )
@@ -1685,7 +1719,203 @@ class App:
 
 # ─── Entry point ────────────────────────────────────────────────────────────
 
+def get_binary_hash() -> str:
+    """Get SHA256 hash of the current executable/script."""
+    try:
+        exe_path = os.path.abspath(sys.executable if getattr(sys, 'frozen', False) else __file__)
+        sha256 = hashlib.sha256()
+        with open(exe_path, 'rb') as f:
+            for chunk in iter(lambda: f.read(8192), b''):
+                sha256.update(chunk)
+        return sha256.hexdigest()
+    except Exception as e:
+        print(f"Failed to calculate binary hash: {e}")
+        return ""
+
+def cleanup_old_polkit_rules():
+    """Remove old NumpadStrategems PolicyKit rules with different hashes."""
+    rules_dir = Path("/etc/polkit-1/rules.d")
+    if not rules_dir.exists():
+        return
+    
+    current_hash = get_binary_hash()
+    if not current_hash:
+        return
+    
+    try:
+        for rule_file in rules_dir.glob("99-numpadstrategems-*.rules"):
+            # Extract hash from filename
+            match = re.search(r'99-numpadstrategems-([a-f0-9]{8})\.rules', rule_file.name)
+            if match:
+                file_hash_prefix = match.group(1)
+                if not current_hash.startswith(file_hash_prefix):
+                    # Old rule, remove it
+                    try:
+                        subprocess.run(['pkexec', 'rm', str(rule_file)], 
+                                     check=False, capture_output=True)
+                        print(f"Cleaned up old PolicyKit rule: {rule_file.name}")
+                    except Exception as e:
+                        print(f"Failed to remove old rule {rule_file.name}: {e}")
+    except Exception as e:
+        print(f"Failed to cleanup old PolicyKit rules: {e}")
+
+def setup_passwordless_elevation():
+    """Create a PolicyKit rule to allow this binary to run without password."""
+    binary_hash = get_binary_hash()
+    if not binary_hash:
+        return False
+    
+    # Use first 8 chars of hash for filename
+    hash_prefix = binary_hash[:8]
+    rule_file = f"/etc/polkit-1/rules.d/99-numpadstrategems-{hash_prefix}.rules"
+    
+    # Check if rule already exists
+    if os.path.exists(rule_file):
+        return True
+    
+    rule_content = f'''/* Allow NumpadStrategems (hash: {binary_hash}) to run without password */
+polkit.addRule(function(action, subject) {{
+    if (action.id == "org.freedesktop.policykit.exec" &&
+        subject.isInGroup("wheel") || subject.isInGroup("sudo")) {{
+        
+        // Get the command being executed
+        var program = action.lookup("program");
+        if (!program) return polkit.Result.NOT_HANDLED;
+        
+        // Calculate hash of the program
+        try {{
+            var hash = GLib.compute_checksum_for_string(GLib.ChecksumType.SHA256, 
+                       GLib.file_get_contents(program)[1], -1);
+            
+            // Allow if hash matches
+            if (hash == "{binary_hash}") {{
+                return polkit.Result.YES;
+            }}
+        }} catch(e) {{
+            // Ignore errors
+        }}
+    }}
+    return polkit.Result.NOT_HANDLED;
+}});
+'''
+    
+    # Create a temporary file with the rule
+    import tempfile
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.rules') as f:
+            f.write(rule_content)
+            temp_file = f.name
+        
+        # Use pkexec to copy it to the system directory
+        result = subprocess.run(
+            ['pkexec', 'sh', '-c', 
+             f'mkdir -p /etc/polkit-1/rules.d && cp {temp_file} {rule_file} && chmod 644 {rule_file}'],
+            capture_output=True, text=True
+        )
+        
+        os.unlink(temp_file)
+        
+        if result.returncode == 0:
+            print(f"PolicyKit rule created: {rule_file}")
+            # Reload PolicyKit
+            subprocess.run(['pkexec', 'systemctl', 'restart', 'polkit'], 
+                         check=False, capture_output=True)
+            return True
+        else:
+            print(f"Failed to create PolicyKit rule: {result.stderr}")
+            return False
+            
+    except Exception as e:
+        print(f"Failed to setup passwordless elevation: {e}")
+        return False
+
+def ask_passwordless_setup():
+    """Show dialog asking if user wants passwordless startup."""
+    from PyQt6.QtWidgets import QMessageBox
+    from PyQt6.QtCore import Qt
+    
+    msg = QMessageBox()
+    msg.setIcon(QMessageBox.Icon.Question)
+    msg.setWindowTitle("Enable Passwordless Startup?")
+    msg.setText("NumpadStrategems needs elevated privileges to capture global hotkeys on Linux.")
+    msg.setInformativeText(
+        "Would you like to enable passwordless startup?\n\n"
+        "This will create a PolicyKit rule that identifies this application by its "
+        "binary hash (not path), so it works even if you move the binary.\n\n"
+        "You'll need to enter your password once to set this up."
+    )
+    msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+    msg.setDefaultButton(QMessageBox.StandardButton.Yes)
+    
+    return msg.exec() == QMessageBox.StandardButton.Yes
+
+def check_and_elevate_if_needed():
+    """On Linux, check if we need elevated privileges for evdev and relaunch with pkexec if needed."""
+    if platform.system() != "Linux" or not HAS_EVDEV:
+        return  # Not Linux or evdev not available
+    
+    # Check if we're already running as root
+    if os.geteuid() == 0:
+        return  # Already elevated
+    
+    # Check if we have permission to access input devices
+    try:
+        # Try to open an input device to test permissions
+        devices = evdev.list_devices()
+        if not devices:
+            return  # No devices to test
+        
+        # Try opening and grabbing a device
+        test_dev = evdev.InputDevice(devices[0])
+        try:
+            test_dev.grab()
+            test_dev.ungrab()
+            test_dev.close()
+            return  # We have permissions, no need to elevate
+        except (OSError, PermissionError):
+            test_dev.close()
+            # Need elevation - relaunch with pkexec
+            pass
+    except (PermissionError, OSError):
+        pass  # Need elevation
+    
+    # Check if pkexec is available
+    if not shutil.which('pkexec'):
+        # pkexec not available, app will show error later
+        return
+    
+    # Check if this is the first elevation attempt (not a retry after setup)
+    if '--skip-passwordless-prompt' not in sys.argv:
+        # Initialize Qt for the dialog
+        from PyQt6.QtWidgets import QApplication
+        temp_app = QApplication.instance()
+        if temp_app is None:
+            temp_app = QApplication(sys.argv)
+        
+        # Ask if user wants passwordless setup
+        if ask_passwordless_setup():
+            # Clean up old rules first
+            cleanup_old_polkit_rules()
+            # Setup passwordless elevation
+            if setup_passwordless_elevation():
+                print("Passwordless elevation configured successfully!")
+    
+    # Relaunch with pkexec
+    try:
+        python_exe = sys.executable
+        script_path = os.path.abspath(__file__)
+        args = [python_exe, script_path, '--skip-passwordless-prompt'] + \
+               [arg for arg in sys.argv[1:] if arg != '--skip-passwordless-prompt']
+        
+        # Use pkexec to relaunch with graphical password prompt
+        os.execvp('pkexec', ['pkexec'] + args)
+    except Exception as e:
+        print(f"Failed to elevate privileges: {e}")
+        # Continue anyway, will fall back to pynput or show error
+
+
 def main():
+    check_and_elevate_if_needed()
     app = App()
     sys.exit(app.run())
 

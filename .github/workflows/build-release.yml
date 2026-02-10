@@ -16,9 +16,13 @@ jobs:
           - os: ubuntu-latest
             artifact_name: NumpadStrategems
             asset_name: NumpadStrategems-Linux
+            platform: Linux
+            ext: ""
           - os: windows-latest
             artifact_name: NumpadStrategems.exe
             asset_name: NumpadStrategems-Windows.exe
+            platform: Windows
+            ext: ".exe"
     
     steps:
       - name: Checkout code
@@ -34,15 +38,27 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pyinstaller
+
+      - name: Set version string
+        shell: bash
+        run: |
+          VERSION_STR="${GITHUB_REF_NAME#v}"
+          if [ -z "$VERSION_STR" ]; then VERSION_STR="dev"; fi
+          echo "VERSION_STR=$VERSION_STR" >> "$GITHUB_ENV"
       
       - name: Build binary
         run: python build_binary.py
+
+      - name: Rename binary with version
+        shell: bash
+        run: |
+          mv "dist/${{ matrix.artifact_name }}" "dist/NumpadStrategems-${VERSION_STR}-${{ matrix.platform }}${{ matrix.ext }}"
       
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.asset_name }}
-          path: dist/${{ matrix.artifact_name }}
+          name: NumpadStrategems-${{ env.VERSION_STR }}-${{ matrix.platform }}
+          path: dist/NumpadStrategems-${{ env.VERSION_STR }}-${{ matrix.platform }}${{ matrix.ext }}
           if-no-files-found: error
 
   release:
@@ -53,27 +69,34 @@ jobs:
       contents: write
     
     steps:
+      - name: Set version string
+        shell: bash
+        run: |
+          VERSION_STR="${GITHUB_REF_NAME#v}"
+          if [ -z "$VERSION_STR" ]; then VERSION_STR="dev"; fi
+          echo "VERSION_STR=$VERSION_STR" >> "$GITHUB_ENV"
+
       - name: Download Linux binary
         uses: actions/download-artifact@v4
         with:
-          name: NumpadStrategems-Linux
+          name: NumpadStrategems-${{ env.VERSION_STR }}-Linux
           path: ./release
       
       - name: Download Windows binary
         uses: actions/download-artifact@v4
         with:
-          name: NumpadStrategems-Windows.exe
+          name: NumpadStrategems-${{ env.VERSION_STR }}-Windows
           path: ./release
       
       - name: Make Linux binary executable
-        run: chmod +x ./release/NumpadStrategems
+        run: chmod +x ./release/NumpadStrategems-${{ env.VERSION_STR }}-Linux
       
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
           files: |
-            ./release/NumpadStrategems
-            ./release/NumpadStrategems.exe
+            ./release/NumpadStrategems-${{ env.VERSION_STR }}-Linux
+            ./release/NumpadStrategems-${{ env.VERSION_STR }}-Windows.exe
           draft: false
           prerelease: false
           generate_release_notes: true
