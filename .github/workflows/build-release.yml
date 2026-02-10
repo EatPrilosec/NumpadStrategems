@@ -49,11 +49,6 @@ jobs:
       - name: Build binary
         run: python build_binary.py
 
-      - name: Rename binary with version
-        shell: bash
-        run: |
-          mv "dist/${{ matrix.artifact_name }}" "dist/NumpadStrategems-${VERSION_STR}-${{ matrix.platform }}${{ matrix.ext }}"
-      
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:

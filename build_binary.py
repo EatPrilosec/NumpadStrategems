@@ -36,38 +36,23 @@ def build_binary(version: str | None):
     version_str = _get_version_string(version)
     platform_str = _platform_label(system)
     
-    # Build path separator for --add-data (Windows uses ;, Linux uses :)
-    add_data_sep = ';' if system == 'Windows' else ':'
-    
-    args = [
-        'NumpadStrategems.py',
-        '--onefile',  # Single executable
-        '--windowed' if system == 'Windows' else '',  # No console on Windows
-        '--name=NumpadStrategems',
-        f'--add-data=Resupply.png{add_data_sep}.',  # Bundle icon as data
-        '--hidden-import=PyQt6.QtCore',
-        '--hidden-import=PyQt6.QtGui',
-        '--hidden-import=PyQt6.QtWidgets',
-        '--hidden-import=pynput',
-        '--hidden-import=pynput.keyboard',
-        '--hidden-import=pynput.mouse',
-        '--collect-all=PyQt6',
-    ]
-    
-    # Add Linux-specific imports
-    if system == 'Linux':
-        args.extend([
-            '--hidden-import=evdev',
-            '--hidden-import=Xlib',
-        ])
-    
-    # Filter out empty strings
-    args = [arg for arg in args if arg]
-    
     print(f"Building for {system}...")
-    print(f"Arguments: {args}")
+    print(f"Using spec file: NumpadStrategems.spec")
     
-    PyInstaller.__main__.run(args)
+    # Use the spec file for cleaner, more reliable builds
+    PyInstaller.__main__.run(['NumpadStrategems.spec'])
+    
+    # Rename binary with version info
+    ext = ".exe" if system == "Windows" else ""
+    src_name = f"NumpadStrategems{ext}"
+    dst_name = f"NumpadStrategems-{version_str}-{platform_str}{ext}"
+    src_path = os.path.join("dist", src_name)
+    dst_path = os.path.join("dist", dst_name)
+    if os.path.exists(src_path):
+        os.replace(src_path, dst_path)
+        print(f"\nBuild complete! Binary: {dst_name}")
+    else:
+        print(f"\nERROR: Expected binary not found at {src_path}")
 
     # Match GitHub Actions naming: NumpadStrategems-<version>-<platform>[.exe]
     ext = ".exe" if system == "Windows" else ""
