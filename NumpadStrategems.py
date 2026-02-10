@@ -24,10 +24,18 @@ import threading
 import subprocess
 import selectors
 import hashlib
+import json
+import urllib.request
+import urllib.error
+import tempfile
 from pathlib import Path
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field
 from typing import Optional, Dict, List, Tuple
+
+# Version
+VERSION = "0.1.0"
+GITHUB_REPO = "EatPrilosec/NumpadStrategems"
 
 # ─── Third-party imports ────────────────────────────────────────────────────
 
@@ -1645,6 +1653,80 @@ class MainWindow(QMainWindow):
         super().moveEvent(ev)
 
 
+# ─── Auto-updater ───────────────────────────────────────────────────────────
+
+class Updater:
+    """Check GitHub for new releases and update the binary."""
+    
+    @staticmethod
+    def get_latest_release() -> Optional[Dict]:
+        """Fetch latest release info from GitHub API."""
+        try:
+            url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+            with urllib.request.urlopen(url, timeout=5) as response:
+                return json.loads(response.read().decode())
+        except Exception:
+            return None
+    
+    @staticmethod
+    def parse_version(version_str: str) -> tuple:
+        """Parse version string like 'v0.1.0' into tuple (0, 1, 0)."""
+        try:
+            cleaned = version_str.lstrip('v')
+            parts = cleaned.split('.')
+            return tuple(int(p) for p in parts)
+        except Exception:
+            return (0, 0, 0)
+    
+    @staticmethod
+    def should_update(current_ver: str, latest_ver: str) -> bool:
+        """Check if update is available."""
+        return Updater.parse_version(latest_ver) > Updater.parse_version(current_ver)
+    
+    @staticmethod
+    def get_platform_asset(release: Dict) -> Optional[Dict]:
+        """Find the asset for current platform."""
+        system = platform.system()
+        platform_str = "Windows" if system == "Windows" else "Linux"
+        ext = ".exe" if system == "Windows" else ""
+        
+        for asset in release.get("assets", []):
+            if platform_str in asset["name"] and asset["name"].endswith(ext or ""):
+                return asset
+        return None
+    
+    @staticmethod
+    def download_and_replace(asset: Dict) -> bool:
+        """Download new binary and replace current executable."""
+        try:
+            current_exe = os.path.abspath(sys.executable if getattr(sys, 'frozen', False) else __file__)
+            if not os.path.exists(current_exe):
+                print(f"Current executable not found: {current_exe}")
+                return False
+            
+            # Download to temp file
+            download_url = asset["browser_download_url"]
+            with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(current_exe)[1]) as tmp:
+                tmp_path = tmp.name
+                with urllib.request.urlopen(download_url, timeout=30) as response:
+                    tmp.write(response.read())
+            
+            # Make executable on Linux
+            if platform.system() == "Linux":
+                os.chmod(tmp_path, 0o755)
+            
+            # Replace current binary
+            backup_path = current_exe + ".bak"
+            shutil.copy2(current_exe, backup_path)
+            shutil.move(tmp_path, current_exe)
+            print("Update installed! Restart the app to use the new version.")
+            return True
+            
+        except Exception as e:
+            print(f"Update failed: {e}")
+            return False
+
+
 # ─── Application ────────────────────────────────────────────────────────────
 
 class App:
@@ -1715,6 +1797,45 @@ class App:
         # Wire up the settings bridge properly now that main_win exists
         self.hotkey_mgr.get_settings = self.main_win.get_hotkey_settings
         self.main_win.show()
+        
+        # Check for updates in background
+        threading.Thread(target=self._check_for_updates, daemon=True).start()
+    
+    def _check_for_updates(self):
+        """Check GitHub for new releases and prompt user if available."""
+        try:
+            release = Updater.get_latest_release()
+            if not release:
+                return
+            
+            latest_version = release.get("tag_name", "")
+            if not Updater.should_update(VERSION, latest_version):
+                return
+            
+            # Found an update - show dialog on main thread
+            from PyQt6.QtWidgets import QMessageBox
+            msg = QMessageBox(self.main_win)
+            msg.setIcon(QMessageBox.Icon.Information)
+            msg.setWindowTitle("Update Available")
+            msg.setText(f"NumpadStrategems {latest_version} is available.")
+            msg.setInformativeText("Would you like to update?")
+            msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            
+            if msg.exec() == QMessageBox.StandardButton.Yes:
+                asset = Updater.get_platform_asset(release)
+                if asset:
+                    if Updater.download_and_replace(asset):
+                        # Show success and close app
+                        QMessageBox.information(
+                            self.main_win,
+                            "Update Complete",
+                            "Update installed! Please restart the application."
+                        )
+                        self.main_win.close()
+                else:
+                    QMessageBox.warning(self.main_win, "Update Failed", "Could not find binary for your platform.")
+        except Exception as e:
+            print(f"Update check error: {e}")
 
 
 # ─── Entry point ────────────────────────────────────────────────────────────
