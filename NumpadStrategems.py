@@ -36,7 +36,7 @@ from dataclasses import dataclass, field
 from typing import Optional, Dict, List, Tuple
 
 # Version
-VERSION = "0.1.5"
+VERSION = "0.1.7"
 GITHUB_REPO = "EatPrilosec/NumpadStrategems"
 
 # ─── Third-party imports ────────────────────────────────────────────────────
@@ -1789,42 +1789,80 @@ class Updater:
         return None
     
     @staticmethod
-    def download_and_replace(asset: Dict, new_version: str) -> bool:
-        """Download new binary with version in filename, delete old binary."""
+    def download_and_replace(asset: Dict, new_version: str, progress_callback=None) -> bool:
+        """Download new binary with version in filename, delete old binary.
+
+        If `progress_callback` is provided it will be called as
+            progress_callback(downloaded_bytes, total_bytes) -> bool
+        and should return True to continue or False to cancel.
+        """
         try:
             current_exe = os.path.abspath(sys.executable if getattr(sys, 'frozen', False) else __file__)
             if not os.path.exists(current_exe):
                 print(f"Current executable not found: {current_exe}")
                 return False
-            
+
             # Determine new filename with version
             system = platform.system()
             platform_str = "Windows" if system == "Windows" else "Linux"
             ext = ".exe" if system == "Windows" else ""
             new_filename = f"NumpadStrategems-{new_version.lstrip('v')}-{platform_str}{ext}"
             new_exe_path = os.path.join(os.path.dirname(current_exe), new_filename)
-            
-            # Download to new versioned filename
+
+            # Download to new versioned filename (streamed)
             download_url = asset["browser_download_url"]
             print(f"[updater] Downloading to: {new_exe_path}")
             ctx = Updater._get_ssl_context()
-            with open(new_exe_path, 'wb') as f:
-                with urllib.request.urlopen(download_url, timeout=30, context=ctx) as response:
-                    f.write(response.read())
-            
+            with urllib.request.urlopen(download_url, timeout=30, context=ctx) as response:
+                total = None
+                try:
+                    total = int(response.getheader('Content-Length') or 0)
+                except Exception:
+                    total = 0
+
+                downloaded = 0
+                tmp_path = new_exe_path + ".part"
+                with open(tmp_path, 'wb') as f:
+                    chunk_size = 8192
+                    while True:
+                        chunk = response.read(chunk_size)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if progress_callback:
+                            try:
+                                cont = progress_callback(downloaded, total)
+                                if cont is False:
+                                    print("[updater] Download cancelled by user")
+                                    try:
+                                        f.close()
+                                    except Exception:
+                                        pass
+                                    try:
+                                        os.unlink(tmp_path)
+                                    except Exception:
+                                        pass
+                                    return False
+                            except Exception:
+                                pass
+
+                # Move temp to final
+                os.replace(tmp_path, new_exe_path)
+
             # Make executable on Linux
             if platform.system() == "Linux":
                 os.chmod(new_exe_path, 0o755)
-            
+
             # Delete old binary
             try:
                 os.remove(current_exe)
             except Exception as e:
                 print(f"Could not remove old binary: {e}")
-            
+
             print(f"Update installed to: {new_exe_path}")
             return True
-            
+
         except Exception as e:
             print(f"Update failed: {e}")
             return False
@@ -1932,8 +1970,37 @@ class App:
                 asset = Updater.get_platform_asset(release)
                 if asset:
                     print(f"[updater] Downloading: {asset['browser_download_url']}")
-                    if Updater.download_and_replace(asset, latest_version):
-                        # Update successful - show info and exit
+                    # Show progress dialog and pass a callback to the downloader
+                    from PyQt6.QtWidgets import QProgressDialog
+                    pd = QProgressDialog("Downloading update...", "Cancel", 0, 100)
+                    pd.setWindowTitle("Updating")
+                    pd.setWindowModality(Qt.WindowModality.ApplicationModal)
+                    pd.setAutoClose(False)
+                    pd.setMinimumDuration(0)
+                    pd.setValue(0)
+
+                    def progress_cb(downloaded, total):
+                        if pd.wasCanceled():
+                            return False
+                        try:
+                            if total and total > 0:
+                                pct = int(downloaded * 100 / total)
+                                pd.setMaximum(100)
+                                pd.setValue(min(pct, 100))
+                            else:
+                                # Unknown size; show busy indicator
+                                pd.setMaximum(0)
+                        except Exception:
+                            pass
+                        QApplication.processEvents()
+                        return True
+
+                    try:
+                        ok = Updater.download_and_replace(asset, latest_version, progress_callback=progress_cb)
+                    finally:
+                        pd.close()
+
+                    if ok:
                         QMessageBox.information(
                             None,
                             "Update Complete",
