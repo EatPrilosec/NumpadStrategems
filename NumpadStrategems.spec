@@ -1,12 +1,16 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 import sys
+import platform
 
-# Data files to include (icon and desktop entry for Linux)
+# Data files to include (platform-specific)
 datas_list = [
-    ('Resupply.png', '.'),  # Include PNG for run-time use
-    ('NumpadStrategems.desktop', '.'),  # Include desktop entry for Linux
+    ('Resupply.png', '.'),  # Include PNG for run-time use on Linux/bundle directory
 ]
+
+# Only include desktop file on Linux
+if platform.system() == 'Linux':
+    datas_list.append(('NumpadStrategems.desktop', '.'))
 
 a = Analysis(
     ['NumpadStrategems.py'],

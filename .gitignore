@@ -4,3 +4,5 @@ rc7_error_output.txt
 build/
 dist/
 .spec
+__pycache__
+NumpadStrategems.desktop

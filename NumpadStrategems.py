@@ -160,10 +160,20 @@ def get_data_dir() -> Path:
 
 
 def get_icon_path() -> Optional[Path]:
-    """Get path to application icon, checking both source and compiled binary locations."""
-    # Check if running as PyInstaller bundle
-    if getattr(sys, 'frozen', False):
-        # Running as compiled binary – icon is in the bundle directory
+    """Get path to application icon, checking both source and compiled binary locations.
+    
+    On Windows compiled binaries, the icon is embedded in the EXE and doesn't need
+    to be loaded here. On Linux/source, we load it from the filesystem.
+    """
+    is_frozen = getattr(sys, 'frozen', False)
+    is_windows = platform.system() == "Windows"
+    
+    # On Windows compiled binaries, skip icon loading – it's in the EXE
+    if is_frozen and is_windows:
+        return None
+    
+    # Check if running as PyInstaller bundle (Linux or other platforms)
+    if is_frozen:
         bundle_dir = Path(sys._MEIPASS)
         icon_path = bundle_dir / 'Resupply.png'
         if icon_path.exists():
