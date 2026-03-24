@@ -36,7 +36,7 @@ from dataclasses import dataclass, field
 from typing import Optional, Dict, List, Tuple
 
 # Version
-VERSION = "0.1.14"
+VERSION = "0.1.16"
 GITHUB_REPO = "EatPrilosec/NumpadStrategems"
 
 # ─── Third-party imports ────────────────────────────────────────────────────
@@ -1339,15 +1339,24 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._load_assignments()
-        self.hotkey_mgr.start()
-        # Update input status after hotkey manager starts (evdev may grab devices asynchronously)
-        QTimer.singleShot(250, self._update_input_status)
-
+        
+        # Calculate and set window size with 15px buffer BEFORE showing
+        self.adjustSize()
+        current_size = self.size()
+        buffered_width = current_size.width() + 15
+        buffered_height = current_size.height() + 15
+        self.resize(buffered_width, buffered_height)
+        self.setMinimumSize(buffered_width, buffered_height)
+        
         # Restore position
         x = settings.get("GUI", "NumpadX")
         y = settings.get("GUI", "NumpadY")
         if x and y:
             self.move(int(x), int(y))
+        
+        self.hotkey_mgr.start()
+        # Update input status after hotkey manager starts (evdev may grab devices asynchronously)
+        QTimer.singleShot(250, self._update_input_status)
 
     def _build_ui(self):
         central = QWidget()
@@ -1373,6 +1382,7 @@ class MainWindow(QMainWindow):
         numpad_grid = QGridLayout(numpad_widget)
         numpad_grid.setSpacing(5)
         numpad_grid.setContentsMargins(0, 0, 0, 0)
+        numpad_grid.setSizeConstraint(QGridLayout.SizeConstraint.SetMinAndMaxSize)
 
         # Create numpad buttons
         btn_defs = [
@@ -1420,6 +1430,7 @@ class MainWindow(QMainWindow):
             numpad_grid.addWidget(btn, r, c, rs, cs)
             self.numpad_buttons[key] = btn
 
+        numpad_widget.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         right.addWidget(numpad_widget)
 
         # ── Delay control ──
@@ -1558,18 +1569,25 @@ class MainWindow(QMainWindow):
             status = "No hotkey backend"
         self.input_status_label.setText(status)
 
-        # ── Size the window to fit all content ──
-        self.adjustSize()
-
     def _populate_grid(self):
         strategems = self.db.load_strategems()
         strategems = self._sort_by_color(strategems)
 
-        # Group by color
+        # Separate strategems with missing icons from those with icons
+        missing_icons = []
+        with_icons = []
+        for s in strategems:
+            icon_path = self.icon_dir / s.color / (safe_filename(s.name) + ".png")
+            if icon_path.exists():
+                with_icons.append(s)
+            else:
+                missing_icons.append(s)
+
+        # Group strategems with icons by color
         groups: Dict[str, List[Strategem]] = {
             "Yellow": [], "Red": [], "Green": [], "Blue": []
         }
-        for s in strategems:
+        for s in with_icons:
             groups.setdefault(s.color, []).append(s)
 
         # Sort sub-groups
@@ -1579,6 +1597,23 @@ class MainWindow(QMainWindow):
 
         row = 0
         col = 0
+        
+        # Display missing icons row first if any exist
+        if missing_icons:
+            for s in missing_icons:
+                btn = self._make_strat_button(s)
+                self.strat_grid.addWidget(btn, row, col)
+                self.strat_buttons[s.name] = btn
+                col += 1
+                if col >= ITEMS_PER_ROW:
+                    col = 0
+                    row += 1
+            # Move to next row after missing icons section
+            if col > 0:
+                row += 1
+                col = 0
+        
+        # Display color-organized strategems
         for color_name in ("Yellow", "Red", "Green", "Blue"):
             items = groups.get(color_name, [])
             if not items:
