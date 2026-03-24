@@ -36,7 +36,7 @@ from dataclasses import dataclass, field
 from typing import Optional, Dict, List, Tuple
 
 # Version
-VERSION = "0.1.7"
+VERSION = "0.1.8"
 GITHUB_REPO = "EatPrilosec/NumpadStrategems"
 
 # ─── Third-party imports ────────────────────────────────────────────────────
@@ -1670,10 +1670,14 @@ class MainWindow(QMainWindow):
             if "sixseven" in self.secret_buffer:
                 self.secret_buffer = ""
                 self._reset_appdata()
-            return
-        super().keyPressEvent(ev)
+                return
+            super().keyPressEvent(ev)
+        else:
+            self.secret_buffer = ""
+            super().keyPressEvent(ev)
 
     def _reset_appdata(self):
+        self.hotkey_mgr.stop()
         try:
             shutil.rmtree(str(self.data_dir))
         except Exception:
