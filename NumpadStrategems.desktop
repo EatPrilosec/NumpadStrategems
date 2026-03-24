@@ -1,0 +1,10 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Stratagem Numpad
+Comment=Global hotkey numpad for Helldivers 2 stratagems
+Icon=/NVME2/Projects/NumpadStrategems/Resupply
+Exec=python /NVME2/Projects/NumpadStrategems/NumpadStrategems.py
+Terminal=false
+Categories=Game;Utility;
+Keywords=helldivers;stratagem;numpad;hotkey;

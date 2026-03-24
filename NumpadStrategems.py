@@ -36,7 +36,7 @@ from dataclasses import dataclass, field
 from typing import Optional, Dict, List, Tuple
 
 # Version
-VERSION = "0.1.8"
+VERSION = "0.1.9"
 GITHUB_REPO = "EatPrilosec/NumpadStrategems"
 
 # ─── Third-party imports ────────────────────────────────────────────────────
@@ -159,6 +159,24 @@ def get_data_dir() -> Path:
     return base / SCRIPT_NAME
 
 
+def get_icon_path() -> Optional[Path]:
+    """Get path to application icon, checking both source and compiled binary locations."""
+    # Check if running as PyInstaller bundle
+    if getattr(sys, 'frozen', False):
+        # Running as compiled binary – icon is in the bundle directory
+        bundle_dir = Path(sys._MEIPASS)
+        icon_path = bundle_dir / 'Resupply.png'
+        if icon_path.exists():
+            return icon_path
+    
+    # Running from source – icon is in project directory
+    source_icon = Path(__file__).parent / 'Resupply.png'
+    if source_icon.exists():
+        return source_icon
+    
+    return None
+
+
 def safe_filename(name: str) -> str:
     """Sanitise a strategem name for use as a filename."""
     return re.sub(r'[<>:"/\\|?*]', '_', name)
@@ -206,6 +224,7 @@ class Settings:
             "ArrowKeys": "1",
         }
         self.config["GUI"] = {}
+        self.config["Devices"] = {}
         self.save()
 
     def save(self):
@@ -269,8 +288,43 @@ class StrategemDB:
         with open(self.ini_path, "w") as f:
             self._cfg.write(f)
 
+    def backup_device_section(self):
+        """Backup device preferences to backup file."""
+        backup_path = self.data_dir / ".device_backup.ini"
+        if self._cfg.has_section("Devices"):
+            backup_cfg = configparser.ConfigParser()
+            backup_cfg.add_section("Devices")
+            for k, v in self._cfg.items("Devices"):
+                backup_cfg.set("Devices", k, v)
+            with open(backup_path, "w") as f:
+                backup_cfg.write(f)
+
+    def restore_device_section_from_backup(self):
+        """Restore device preferences from backup file after reset."""
+        backup_path = self.data_dir / ".device_backup.ini"
+        if not backup_path.exists():
+            return
+        try:
+            backup_cfg = configparser.ConfigParser()
+            backup_cfg.read(str(backup_path))
+            if backup_cfg.has_section("Devices"):
+                if not self._cfg.has_section("Devices"):
+                    self._cfg.add_section("Devices")
+                for k, v in backup_cfg.items("Devices"):
+                    self._cfg.set("Devices", k, v)
+                with open(self.ini_path, "w") as f:
+                    self._cfg.write(f)
+            backup_path.unlink()  # Remove backup after restore
+        except Exception as e:
+            print(f"Failed to restore device preferences: {e}")
+
     def save_strategems(self, strategems: List[Strategem]):
         """Write full strategem list to INI."""
+        # Preserve Devices section
+        devices = {}
+        if self._cfg.has_section("Devices"):
+            devices = dict(self._cfg.items("Devices"))
+        
         self._cfg = configparser.ConfigParser(interpolation=None)
         self._cfg.optionxform = str
         for s in strategems:
@@ -279,6 +333,13 @@ class StrategemDB:
             self._cfg.set(s.name, "Warbond", s.warbond)
             if s.color:
                 self._cfg.set(s.name, "Color", s.color)
+        
+        # Restore Devices section
+        if devices:
+            self._cfg.add_section("Devices")
+            for k, v in devices.items():
+                self._cfg.set("Devices", k, v)
+        
         with open(self.ini_path, "w") as f:
             self._cfg.write(f)
 
@@ -688,6 +749,33 @@ class HotkeyManager:
         self._pynput_controller = None
         self._pynput_ctrl_down = set()
 
+    def get_selected_device_paths(self) -> Optional[set]:
+        """Get set of device paths to grab. None means grab all available."""
+        if not self.db._cfg.has_section("Devices"):
+            return None
+        paths = set()
+        for key, val in self.db._cfg.items("Devices"):
+            if key.startswith("path_") and val == "1":
+                paths.add(key[5:])
+        return paths if paths else None
+
+    def set_selected_device_paths(self, paths: Optional[set]):
+        """Store device paths to grab. None means grab all."""
+        if not self.db._cfg.has_section("Devices"):
+            self.db._cfg.add_section("Devices")
+        for key in list(self.db._cfg["Devices"].keys()):
+            if key.startswith("path_"):
+                self.db._cfg.remove_option("Devices", key)
+        if paths:
+            for path in paths:
+                self.db._cfg.set("Devices", f"path_{path}", "1")
+        with open(self.db.ini_path, "w") as f:
+            self.db._cfg.write(f)
+
+    def backup_device_prefs(self):
+        """Backup device preferences before reset."""
+        self.db.backup_device_section()
+
     def start(self):
         self._running = True
         import atexit
@@ -734,13 +822,30 @@ class HotkeyManager:
                 print("No keyboard/input devices found")
                 return False
 
-            # Create virtual keyboard that merges capabilities of all devices
+            # Filter devices based on user selection
+            selected_paths = self.get_selected_device_paths()
+            if selected_paths is None:
+                # First time or "grab all" mode
+                devices_to_grab = candidates
+            else:
+                devices_to_grab = [dev for dev in candidates if dev.path in selected_paths]
+                for dev in candidates:
+                    if dev not in devices_to_grab:
+                        dev.close()
+
+            if not devices_to_grab:
+                print("No selected devices to grab")
+                for dev in candidates:
+                    dev.close()
+                return False
+
+            # Create virtual keyboard that merges capabilities of selected devices
             self._ev_uinput = evdev.UInput.from_device(
-                *candidates, name=self.UINPUT_NAME
+                *devices_to_grab, name=self.UINPUT_NAME
             )
 
-            # Grab ALL candidate devices exclusively
-            for dev in candidates:
+            # Grab selected devices exclusively
+            for dev in devices_to_grab:
                 try:
                     dev.grab()
                     self._ev_devices.append(dev)
@@ -779,6 +884,9 @@ class HotkeyManager:
         """Read events from ALL grabbed devices and forward non-intercepted ones."""
         try:
             while self._running:
+                # Exit if selector was closed during device change
+                if not self._ev_selector or not self._ev_devices:
+                    break
                 # Block up to 0.5s waiting for events from any device
                 events = self._ev_selector.select(timeout=0.5)
                 for key, _mask in events:
@@ -822,6 +930,12 @@ class HotkeyManager:
                 self._ev_uinput.write_event(event)
 
     def _stop_evdev(self):
+        # Signal thread to exit and wait for it to finish
+        self._running = False
+        if self._ev_thread and self._ev_thread.is_alive():
+            self._ev_thread.join(timeout=1.0)
+        self._ev_thread = None
+        
         # Close selector
         if self._ev_selector:
             try:
@@ -984,6 +1098,110 @@ class ClickableLabel(QLabel):
         super().leaveEvent(ev)
 
 
+# ─── Device selection dialog ────────────────────────────────────────────────
+
+class DeviceSelectionDialog(QDialog):
+    """Dialog to select which input devices to grab for hotkeys."""
+
+    def __init__(self, hotkey_mgr: 'HotkeyManager', parent=None):
+        super().__init__(parent)
+        self.hotkey_mgr = hotkey_mgr
+        self.device_checkboxes: Dict[str, QCheckBox] = {}
+        self.setWindowTitle("Select Input Devices")
+        self.setStyleSheet(f"background-color: {DARK_BG}; color: white;")
+        self.setMinimumWidth(400)
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(8)
+        
+        # Instructions
+        instr = QLabel("Select which input devices to use for global hotkeys:")
+        instr.setStyleSheet("color: #ccc; margin-bottom: 8px;")
+        layout.addWidget(instr)
+        
+        # Device list with scrolling
+        scroll = QScrollArea()
+        scroll.setStyleSheet(f"background-color: {DARK_BG}; border: 1px solid #444;")
+        scroll_widget = QWidget()
+        scroll_layout = QVBoxLayout(scroll_widget)
+        scroll_layout.setContentsMargins(0, 0, 0, 0)
+        scroll_layout.setSpacing(4)
+        
+        # Get available devices
+        available = self._get_available_devices()
+        selected_paths = hotkey_mgr.get_selected_device_paths()
+        
+        for dev_path, dev_name in available:
+            cb = QCheckBox(dev_name)
+            cb.setStyleSheet("QCheckBox { color: white; spacing: 4px; }")
+            is_selected = selected_paths is None or dev_path in selected_paths
+            cb.setChecked(is_selected)
+            self.device_checkboxes[dev_path] = cb
+            scroll_layout.addWidget(cb)
+        
+        scroll_layout.addStretch()
+        scroll.setWidget(scroll_widget)
+        scroll.setWidgetResizable(True)
+        layout.addWidget(scroll)
+        
+        # Buttons
+        btn_layout = QHBoxLayout()
+        sel_all = QPushButton("Select All")
+        sel_all.setStyleSheet("QPushButton { background-color: #444; color: white; padding: 6px; }")
+        sel_all.clicked.connect(lambda: [cb.setChecked(True) for cb in self.device_checkboxes.values()])
+        desel_all = QPushButton("Deselect All")
+        desel_all.setStyleSheet("QPushButton { background-color: #444; color: white; padding: 6px; }")
+        desel_all.clicked.connect(lambda: [cb.setChecked(False) for cb in self.device_checkboxes.values()])
+        btn_layout.addWidget(sel_all)
+        btn_layout.addWidget(desel_all)
+        layout.addLayout(btn_layout)
+        
+        # OK/Cancel
+        dialog_btns = QHBoxLayout()
+        ok_btn = QPushButton("OK")
+        ok_btn.setStyleSheet("QPushButton { background-color: #555; color: white; padding: 8px 20px; }")
+        ok_btn.clicked.connect(self.accept)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setStyleSheet("QPushButton { background-color: #444; color: white; padding: 8px 20px; }")
+        cancel_btn.clicked.connect(self.reject)
+        dialog_btns.addStretch()
+        dialog_btns.addWidget(ok_btn)
+        dialog_btns.addWidget(cancel_btn)
+        layout.addLayout(dialog_btns)
+
+    def _get_available_devices(self) -> List[Tuple[str, str]]:
+        """Get list of (path, name) for available input devices."""
+        devices = []
+        try:
+            for device_path in evdev.list_devices():
+                try:
+                    dev = evdev.InputDevice(device_path)
+                    if dev.name == "NumpadStrategems-vkbd":
+                        dev.close()
+                        continue
+                    caps = dev.capabilities(verbose=False)
+                    key_caps = set(caps.get(ec.EV_KEY, []))
+                    has_numpad = bool(key_caps & set(_EV_NUMPAD_MAP.keys()))
+                    has_ctrl = bool(key_caps & _EV_CTRL_CODES)
+                    has_wasd = bool(key_caps & set(_EV_WASD_KEYS.values()))
+                    if has_numpad or has_ctrl or has_wasd:
+                        devices.append((device_path, dev.name))
+                    dev.close()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return devices
+
+    def get_selected_paths(self) -> Optional[set]:
+        """Return None if all selected, else set of selected paths."""
+        selected = {p for p, cb in self.device_checkboxes.items() if cb.isChecked()}
+        if len(selected) == len(self.device_checkboxes) and len(selected) > 0:
+            return None
+        return selected if selected else None
+
+
 # ─── Status window ──────────────────────────────────────────────────────────
 
 class StatusWindow(QDialog):
@@ -1098,10 +1316,10 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Stratagem Numpad")
         self.setStyleSheet(f"background-color: {DARK_BG}; color: white;")
 
-        # Try to set window icon
-        ico = Path(__file__).parent / "Resupply.png"
-        if ico.exists():
-            self.setWindowIcon(QIcon(str(ico)))
+        # Set window icon
+        icon_path = get_icon_path()
+        if icon_path:
+            self.setWindowIcon(QIcon(str(icon_path)))
 
         self._build_ui()
         self._load_assignments()
@@ -1284,10 +1502,12 @@ class MainWindow(QMainWindow):
         self.version_label.setFont(QFont("Segoe UI", 9))
         self.version_label.setStyleSheet("color: #aaa; padding: 2px;")
         self.version_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom)
-        self.input_status_label = QLabel()
+        self.input_status_label = ClickableLabel()
         self.input_status_label.setFont(QFont("Segoe UI", 9))
         self.input_status_label.setStyleSheet("color: #aaa; padding: 2px;")
         self.input_status_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom)
+        self.input_status_label.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.input_status_label.clicked.connect(self._on_device_status_clicked)
         status_row = QHBoxLayout()
         status_row.addStretch()
         status_row.addWidget(self.version_label)
@@ -1561,6 +1781,23 @@ class MainWindow(QMainWindow):
             "border: 1px solid #555; color: white; background-color: #2a2a2a;"
         )
 
+    def _on_device_status_clicked(self):
+        """Show device selection dialog on evdev status click."""
+        mgr = self.hotkey_mgr
+        # Only show for Linux with evdev active
+        if platform.system() != "Linux" or not HAS_EVDEV:
+            return
+        if not (hasattr(mgr, "_ev_devices") and mgr._ev_devices):
+            return
+        dialog = DeviceSelectionDialog(mgr, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            selected = dialog.get_selected_paths()
+            mgr.set_selected_device_paths(selected)
+            # Restart hotkey manager
+            mgr.stop()
+            mgr.start()
+            self._update_input_status()
+
     # ── Hover info ──
 
     def _show_strat_info(self, name: str):
@@ -1678,6 +1915,8 @@ class MainWindow(QMainWindow):
 
     def _reset_appdata(self):
         self.hotkey_mgr.stop()
+        # Backup device preferences before reset
+        self.hotkey_mgr.backup_device_prefs()
         try:
             shutil.rmtree(str(self.data_dir))
         except Exception:
@@ -1878,6 +2117,10 @@ class App:
     def __init__(self):
         self.qt_app = QApplication(sys.argv)
         self.qt_app.setStyle("Fusion")
+        
+        # Set application name and icon for Wayland/desktop environment
+        self.qt_app.setApplicationName("Stratagem Numpad")
+        self.qt_app.setApplicationVersion(VERSION)
 
         # Dark palette
         palette = QPalette()
@@ -1892,16 +2135,18 @@ class App:
         palette.setColor(QPalette.ColorRole.HighlightedText, QColor("black"))
         self.qt_app.setPalette(palette)
 
-        # Set window icon globally
-        ico = Path(__file__).parent / "Resupply.png"
-        if ico.exists():
-            self.qt_app.setWindowIcon(QIcon(str(ico)))
+        # Set application icon globally (works for both source and compiled binary)
+        icon_path = get_icon_path()
+        if icon_path:
+            self.qt_app.setWindowIcon(QIcon(str(icon_path)))
 
         self.data_dir = get_data_dir()
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
         self.settings = Settings(self.data_dir / f"{SCRIPT_NAME}.ini")
         self.db = StrategemDB(self.data_dir)
+        # Restore device preferences from backup after reset
+        self.db.restore_device_section_from_backup()
 
         self.status_win: Optional[StatusWindow] = None
         self.main_win: Optional[MainWindow] = None

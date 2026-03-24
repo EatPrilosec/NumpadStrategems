@@ -1,11 +1,23 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+# Embed icon and desktop entry for Linux/Windows cross-platform support
+import sys
+import os
+
+# Icon path for embedding in binary
+icon_path = os.path.join(os.path.dirname(__file__), 'Resupply.ico')
+
+# Data files to include (icon and desktop entry for Linux)
+datas_list = [
+    ('Resupply.png', '.'),  # Include PNG for run-time use
+    ('NumpadStrategems.desktop', '.'),  # Include desktop entry for Linux
+]
 
 a = Analysis(
     ['NumpadStrategems.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=datas_list,
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
