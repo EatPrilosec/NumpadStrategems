@@ -36,7 +36,7 @@ from dataclasses import dataclass, field
 from typing import Optional, Dict, List, Tuple
 
 # Version
-VERSION = "0.1.13"
+VERSION = "0.1.14"
 GITHUB_REPO = "EatPrilosec/NumpadStrategems"
 
 # ─── Third-party imports ────────────────────────────────────────────────────
@@ -286,7 +286,8 @@ class StrategemDB:
 
     # Strategem data
     def sections(self) -> List[str]:
-        return [s for s in self._cfg.sections() if s != "__None__"]
+        """Return list of strategem sections (excluding metadata sections like [Devices])."""
+        return [s for s in self._cfg.sections() if s not in ("__None__", "Devices", "Settings", "Assignments")]
 
     def get(self, name: str, key: str, default: str = "") -> str:
         return self._cfg.get(name, key, fallback=default)
@@ -739,8 +740,9 @@ class HotkeyManager:
 
     UINPUT_NAME = "NumpadStrategems-vkbd"
 
-    def __init__(self, db: StrategemDB, get_settings_fn):
+    def __init__(self, db: StrategemDB, get_settings_fn, settings: Settings = None):
         self.db = db
+        self.settings = settings
         self.get_settings = get_settings_fn  # returns (arrow_keys: bool, delay_ms: int, release_ctrl: bool)
         self.ctrl_pressed = False
         self._executing = False
@@ -761,30 +763,34 @@ class HotkeyManager:
 
     def get_selected_device_paths(self) -> Optional[set]:
         """Get set of device paths to grab. None means grab all available."""
-        if not self.db._cfg.has_section("Devices"):
+        if not self.settings:
             return None
         paths = set()
-        for key, val in self.db._cfg.items("Devices"):
+        for key, val in self.settings.config.items("Devices"):
             if key.startswith("path_") and val == "1":
                 paths.add(key[5:])
         return paths if paths else None
 
     def set_selected_device_paths(self, paths: Optional[set]):
         """Store device paths to grab. None means grab all."""
-        if not self.db._cfg.has_section("Devices"):
-            self.db._cfg.add_section("Devices")
-        for key in list(self.db._cfg["Devices"].keys()):
-            if key.startswith("path_"):
-                self.db._cfg.remove_option("Devices", key)
+        if not self.settings:
+            return
+        # Clear existing device paths
+        if self.settings.config.has_section("Devices"):
+            for key in list(self.settings.config["Devices"].keys()):
+                if key.startswith("path_"):
+                    self.settings.config.remove_option("Devices", key)
+        # Set new device paths
         if paths:
             for path in paths:
-                self.db._cfg.set("Devices", f"path_{path}", "1")
-        with open(self.db.ini_path, "w") as f:
-            self.db._cfg.write(f)
+                self.settings.set("Devices", f"path_{path}", "1")
 
     def backup_device_prefs(self):
         """Backup device preferences before reset."""
-        self.db.backup_device_section()
+        if self.settings:
+            # Device preferences are saved in Settings, which is separate from app data
+            # They will be preserved across resets automatically
+            pass
 
     def start(self):
         self._running = True
@@ -1925,12 +1931,27 @@ class MainWindow(QMainWindow):
 
     def _reset_appdata(self):
         self.hotkey_mgr.stop()
-        # Backup device preferences before reset
-        self.hotkey_mgr.backup_device_prefs()
+        
+        # Backup settings INI to temp location before reset
+        settings_path = self.settings.path
+        temp_settings = None
+        if settings_path.exists():
+            temp_dir = tempfile.mkdtemp()
+            temp_settings = Path(temp_dir) / "NumpadStrategems.ini"
+            shutil.copy(str(settings_path), str(temp_settings))
+        
+        # Delete entire app data directory
         try:
             shutil.rmtree(str(self.data_dir))
         except Exception:
             pass
+        
+        # Restore settings INI from temp backup
+        if temp_settings and temp_settings.exists():
+            self.data_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copy(str(temp_settings), str(settings_path))
+            shutil.rmtree(str(temp_settings.parent))
+        
         # Restart
         os.execv(sys.executable, [sys.executable] + sys.argv)
 
@@ -2155,8 +2176,6 @@ class App:
 
         self.settings = Settings(self.data_dir / f"{SCRIPT_NAME}.ini")
         self.db = StrategemDB(self.data_dir)
-        # Restore device preferences from backup after reset
-        self.db.restore_device_section_from_backup()
 
         self.status_win: Optional[StatusWindow] = None
         self.main_win: Optional[MainWindow] = None
@@ -2193,7 +2212,7 @@ class App:
 
     def _show_main(self):
         self.db.reload()
-        self.hotkey_mgr = HotkeyManager(self.db, lambda: (False, 67, False))
+        self.hotkey_mgr = HotkeyManager(self.db, lambda: (False, 67, False), self.settings)
         self.main_win = MainWindow(
             self.data_dir, self.settings, self.db, self.hotkey_mgr
         )
