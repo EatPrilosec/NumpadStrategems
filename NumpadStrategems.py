@@ -112,11 +112,18 @@ COLOR_REFS = {
 }
 COLOR_TOLERANCE = 60
 
-ITEMS_PER_ROW = 15
+DEFAULT_ITEMS_PER_ROW = 17
+MIN_ITEMS_PER_ROW = 4
+ITEMS_PER_ROW = 17
 ICON_SIZE = 50
 ICON_SPACING = 5
 DARK_BG = "#1e1e1e"
 DARK_BG_RGB = (30, 30, 30)
+
+DEFAULT_WINDOW_WIDTH = 1170
+DEFAULT_WINDOW_HEIGHT = 560
+MIN_WINDOW_WIDTH = 455
+MIN_WINDOW_HEIGHT = 530
 
 # Razer Naga default mappings: buttons 1-9 -> numpad 1-9, 10 -> numpad 0, 11 -> numpad ., 12 -> numpad Enter
 DEFAULT_NAGA_MAPPINGS = {
@@ -296,6 +303,11 @@ class Settings:
             self.config.add_section(section)
         self.config.set(section, key, str(value))
         self.save()
+
+    def remove_option(self, section: str, key: str):
+        if self.config.has_section(section) and self.config.has_option(section, key):
+            self.config.remove_option(section, key)
+            self.save()
 
 
 class StrategemDB:
@@ -1486,6 +1498,8 @@ class MainWindow(QMainWindow):
         self.hotkey_mgr = hotkey_mgr
         self.icon_dir = data_dir / "icons"
 
+        self.current_items_per_row = DEFAULT_ITEMS_PER_ROW
+        self.category_strats: Dict[str, List[Strategem]] = {}
         self.is_naga_mode = self.settings.getbool("Numpad", "NagaMode", False)
         self.selected_strategem: str = ""
         self.selected_numpad_key: str = ""
@@ -1504,21 +1518,23 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self._load_assignments()
-        
-        # Calculate and set window size with 15px buffer BEFORE showing
-        self.adjustSize()
-        current_size = self.size()
-        buffered_width = current_size.width() + 15
-        buffered_height = current_size.height() + 15
-        self.resize(buffered_width, buffered_height)
-        self.setMinimumSize(buffered_width, buffered_height)
-        
+
+        self.setMinimumSize(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT)
+
+        # Restore saved window size if valid, otherwise use default 17-item width & height
+        saved_w = self.settings.getint("GUI", "NumpadW", 0)
+        saved_h = self.settings.getint("GUI", "NumpadH", 0)
+        if saved_w >= MIN_WINDOW_WIDTH and saved_h >= MIN_WINDOW_HEIGHT:
+            self.resize(saved_w, saved_h)
+        else:
+            self.resize(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT)
+
         # Restore position
         x = settings.get("GUI", "NumpadX")
         y = settings.get("GUI", "NumpadY")
         if x and y:
             self.move(int(x), int(y))
-        
+
         self.hotkey_mgr.start()
         # Update input status after hotkey manager starts (evdev may grab devices asynchronously)
         QTimer.singleShot(250, self._update_input_status)
@@ -1530,19 +1546,42 @@ class MainWindow(QMainWindow):
         main_layout.setContentsMargins(5, 5, 5, 5)
         main_layout.setSpacing(10)
 
-        # ── Left: strategem grid (no scroll, window sizes to fit) ──
-        grid_widget = QWidget()
-        self.strat_grid = QGridLayout(grid_widget)
-        self.strat_grid.setSpacing(ICON_SPACING)
-        self.strat_grid.setContentsMargins(0, 0, 0, 0)
-        main_layout.addWidget(grid_widget, 0)
+        # ── Left: strategem grid container (fills available width and height) ──
+        self.grid_widget = QWidget()
+        self.grid_layout = QVBoxLayout(self.grid_widget)
+        self.grid_layout.setContentsMargins(0, 0, 0, 0)
+        self.grid_layout.setSpacing(0)
 
-        # ── Right: numpad + controls ──
-        right = QVBoxLayout()
-        right.setSpacing(5)
-        main_layout.addLayout(right, 0)
+        self.category_widgets: Dict[str, QWidget] = {}
+        self.category_grids: Dict[str, QGridLayout] = {}
 
-        # ── NagaMode toggle row above numpad ──
+        for cat in ("Missing", "Yellow", "Red", "Green", "Blue"):
+            cat_w = QWidget()
+            cat_grid = QGridLayout(cat_w)
+            cat_grid.setContentsMargins(0, 0, 0, 0)
+            cat_grid.setSpacing(ICON_SPACING)
+            cat_grid.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+            self.category_widgets[cat] = cat_w
+            self.category_grids[cat] = cat_grid
+            self.grid_layout.addWidget(cat_w, 0)
+            if cat != "Blue":
+                self.grid_layout.addStretch(1)
+
+        main_layout.addWidget(self.grid_widget, 1)
+
+        # ── Right: numpad + controls container ──
+        self.right_widget = QWidget()
+        self.right_widget.setFixedWidth(220)
+        right = QVBoxLayout(self.right_widget)
+        right.setContentsMargins(0, 0, 0, 0)
+        right.setSpacing(0)
+
+        # ── Top Panel: Naga toggle + Pad (anchored to top right) ──
+        top_panel = QWidget()
+        top_layout = QVBoxLayout(top_panel)
+        top_layout.setContentsMargins(0, 0, 0, 0)
+        top_layout.setSpacing(0)
+
         naga_row = QHBoxLayout()
         naga_row.setContentsMargins(0, 0, 0, 0)
         naga_row.setSpacing(6)
@@ -1566,8 +1605,8 @@ class MainWindow(QMainWindow):
         naga_row.addWidget(self.naga_cfg_btn)
         naga_row.addStretch()
 
-        right.addLayout(naga_row)
-        right.addSpacing(6)
+        top_layout.addLayout(naga_row)
+        top_layout.addSpacing(6)
 
         # Numpad grid widget (fixed size matching standard numpad: 215x270)
         self.numpad_widget = QWidget()
@@ -1579,9 +1618,20 @@ class MainWindow(QMainWindow):
         self.numpad_widget.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 
         self._rebuild_numpad_grid()
-        right.addWidget(self.numpad_widget)
+        top_layout.addWidget(self.numpad_widget, 0, Qt.AlignmentFlag.AlignCenter)
 
-        # ── Delay control ──
+        right.addWidget(top_panel, 0, Qt.AlignmentFlag.AlignTop)
+
+        # Expanding vertical stretch between top pad and bottom info/checkbox pane
+        right.addStretch(1)
+
+        # ── Bottom Panel: Controls & Hover info (anchored to bottom right) ──
+        bottom_panel = QWidget()
+        bottom_layout = QVBoxLayout(bottom_panel)
+        bottom_layout.setContentsMargins(0, 0, 0, 0)
+        bottom_layout.setSpacing(5)
+
+        # Delay control
         delay_row = QHBoxLayout()
         lbl = QLabel("Delay:")
         lbl.setFont(QFont("Segoe UI", 10))
@@ -1610,15 +1660,15 @@ class MainWindow(QMainWindow):
         delay_row.addWidget(dn_btn)
 
         delay_row.addStretch()
-        right.addLayout(delay_row)
+        bottom_layout.addLayout(delay_row)
 
-        # ── Checkboxes ──
+        # Checkboxes
         self.always_on_top_cb = QCheckBox("Always on Top")
         self.always_on_top_cb.setFont(QFont("Segoe UI", 10))
         self.always_on_top_cb.setStyleSheet("color: white;")
         self.always_on_top_cb.setChecked(self.settings.getbool("Numpad", "AlwaysOnTop"))
         self.always_on_top_cb.toggled.connect(self._toggle_always_on_top)
-        right.addWidget(self.always_on_top_cb)
+        bottom_layout.addWidget(self.always_on_top_cb)
         if self.always_on_top_cb.isChecked():
             self.setWindowFlags(self.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
 
@@ -1629,7 +1679,7 @@ class MainWindow(QMainWindow):
         self.arrow_keys_cb.toggled.connect(
             lambda v: self.settings.set("Numpad", "ArrowKeys", int(v))
         )
-        right.addWidget(self.arrow_keys_cb)
+        bottom_layout.addWidget(self.arrow_keys_cb)
 
         self.release_ctrl_cb = QCheckBox("Release Ctrl Before Input")
         self.release_ctrl_cb.setFont(QFont("Segoe UI", 10))
@@ -1638,26 +1688,26 @@ class MainWindow(QMainWindow):
         self.release_ctrl_cb.toggled.connect(
             lambda v: self.settings.set("Numpad", "ReleaseCtrl", int(v))
         )
-        right.addWidget(self.release_ctrl_cb)
+        bottom_layout.addWidget(self.release_ctrl_cb)
 
-        # ── Hover info display ──
-        right.addSpacing(10)
+        # Hover info display
+        bottom_layout.addSpacing(6)
         self.info_name = QLabel("")
-        self.info_name.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
+        self.info_name.setFont(QFont("Segoe UI", 13, QFont.Weight.Bold))
         self.info_name.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.info_name.setWordWrap(True)
-        self.info_name.setMinimumWidth(220)
-        right.addWidget(self.info_name)
+        self.info_name.setMinimumWidth(215)
+        bottom_layout.addWidget(self.info_name)
 
         self.info_warbond = QLabel("")
         self.info_warbond.setFont(QFont("Segoe UI", 10))
         self.info_warbond.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        right.addWidget(self.info_warbond)
+        bottom_layout.addWidget(self.info_warbond)
 
         self.info_assignment = QLabel("")
         self.info_assignment.setFont(QFont("Segoe UI", 10))
         self.info_assignment.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        right.addWidget(self.info_assignment)
+        bottom_layout.addWidget(self.info_assignment)
 
         # Arrow code display
         self.arrow_container = QHBoxLayout()
@@ -1669,10 +1719,9 @@ class MainWindow(QMainWindow):
             al.hide()
             self.arrow_container.addWidget(al)
             self.arrow_labels.append(al)
-        right.addLayout(self.arrow_container)
+        bottom_layout.addLayout(self.arrow_container)
 
-        right.addStretch()
-        # Add app version and input status label at the bottom, right-aligned
+        # Status & Version
         self.version_label = QLabel(f"v{VERSION}")
         self.version_label.setFont(QFont("Segoe UI", 9))
         self.version_label.setStyleSheet("color: #aaa; padding: 2px;")
@@ -1683,15 +1732,30 @@ class MainWindow(QMainWindow):
         self.input_status_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom)
         self.input_status_label.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         self.input_status_label.clicked.connect(self._on_device_status_clicked)
+
         status_row = QHBoxLayout()
         status_row.addStretch()
         status_row.addWidget(self.version_label)
         status_row.addWidget(self.input_status_label)
-        right.addLayout(status_row)
+        bottom_layout.addLayout(status_row)
+
+        right.addWidget(bottom_panel, 0, Qt.AlignmentFlag.AlignBottom)
+        main_layout.addWidget(self.right_widget, 0)
+
         self._update_input_status()
 
         # ── Populate strategem grid ──
         self._populate_grid()
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        grid_w = self.grid_widget.width()
+        if grid_w > 50:
+            new_items = max(MIN_ITEMS_PER_ROW, (grid_w + ICON_SPACING) // (ICON_SIZE + ICON_SPACING))
+            if new_items != self.current_items_per_row:
+                self.current_items_per_row = new_items
+                self._reflow_grid()
+
     def _update_input_status(self):
         mgr = self.hotkey_mgr
         status = None
@@ -1741,42 +1805,46 @@ class MainWindow(QMainWindow):
         groups["Red"] = self._sort_red(groups.get("Red", []))
         groups["Green"] = self._sort_green(groups.get("Green", []))
 
-        row = 0
-        col = 0
-        
-        # Display missing icons row first if any exist
-        if missing_icons:
-            for s in missing_icons:
-                btn = self._make_strat_button(s)
-                self.strat_grid.addWidget(btn, row, col)
-                self.strat_buttons[s.name] = btn
-                col += 1
-                if col >= ITEMS_PER_ROW:
-                    col = 0
-                    row += 1
-            # Move to next row after missing icons section
-            if col > 0:
-                row += 1
-                col = 0
-        
-        # Display color-organized strategems
-        for color_name in ("Yellow", "Red", "Green", "Blue"):
-            items = groups.get(color_name, [])
-            if not items:
-                continue
-            # Start new row for each color group
-            if col > 0:
-                row += 1
-                col = 0
+        self.category_strats = {
+            "Missing": missing_icons,
+            "Yellow": groups.get("Yellow", []),
+            "Red": groups.get("Red", []),
+            "Green": groups.get("Green", []),
+            "Blue": groups.get("Blue", []),
+        }
+
+        # Create buttons once
+        for cat, items in self.category_strats.items():
             for s in items:
-                btn = self._make_strat_button(s)
-                self.strat_grid.addWidget(btn, row, col)
-                self.strat_buttons[s.name] = btn
-                col += 1
-                if col >= ITEMS_PER_ROW:
-                    col = 0
-                    row += 1
-            # If last row wasn't full, that's fine – next color starts new row
+                if s.name not in self.strat_buttons:
+                    self.strat_buttons[s.name] = self._make_strat_button(s)
+
+        self._reflow_grid()
+
+    def _reflow_grid(self):
+        k = self.current_items_per_row
+        for cat, grid in self.category_grids.items():
+            while grid.count():
+                item = grid.takeAt(0)
+                widget = item.widget()
+                if widget:
+                    widget.setParent(None)
+
+            items = self.category_strats.get(cat, [])
+            cat_widget = self.category_widgets.get(cat)
+            if not items:
+                if cat_widget:
+                    cat_widget.hide()
+                continue
+            if cat_widget:
+                cat_widget.show()
+
+            for idx, s in enumerate(items):
+                r = idx // k
+                c = idx % k
+                btn = self.strat_buttons.get(s.name)
+                if btn:
+                    grid.addWidget(btn, r, c)
 
     def _make_strat_button(self, s: Strategem) -> ClickableLabel:
         btn = ClickableLabel()
@@ -2305,9 +2373,11 @@ class MainWindow(QMainWindow):
     def _reset_appdata(self):
         self.hotkey_mgr.stop()
 
-        # Flush all current state to Settings INI before resetting app data
+        # Flush state to settings, but clear saved window dimensions so reset reopens at default 17-icon size
         self.settings.set("GUI", "NumpadX", self.x())
         self.settings.set("GUI", "NumpadY", self.y())
+        self.settings.remove_option("GUI", "NumpadW")
+        self.settings.remove_option("GUI", "NumpadH")
         self.settings.set("Settings", "KeyDelayMS", self.delay_display.text())
         self.settings.set("Numpad", "NagaMode", int(self.is_naga_mode))
         self.settings.save()
@@ -2343,7 +2413,11 @@ class MainWindow(QMainWindow):
     def closeEvent(self, ev):
         self.settings.set("GUI", "NumpadX", self.x())
         self.settings.set("GUI", "NumpadY", self.y())
+        self.settings.set("GUI", "NumpadW", self.width())
+        self.settings.set("GUI", "NumpadH", self.height())
         self.settings.set("Settings", "KeyDelayMS", self.delay_display.text())
+        self.settings.set("Numpad", "NagaMode", int(self.is_naga_mode))
+        self.settings.save()
         self.hotkey_mgr.stop()
         super().closeEvent(ev)
 
