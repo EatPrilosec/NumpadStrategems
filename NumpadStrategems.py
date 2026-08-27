@@ -1544,6 +1544,10 @@ class MainWindow(QMainWindow):
 
         # ── NagaMode toggle row above numpad ──
         naga_row = QHBoxLayout()
+        naga_row.setContentsMargins(0, 0, 0, 0)
+        naga_row.setSpacing(6)
+        naga_row.addStretch()
+
         self.naga_mode_cb = QCheckBox("NagaMode")
         self.naga_mode_cb.setFont(QFont("Segoe UI", 10))
         self.naga_mode_cb.setStyleSheet("color: white;")
@@ -1561,7 +1565,9 @@ class MainWindow(QMainWindow):
         self.naga_cfg_btn.clicked.connect(self._open_naga_config)
         naga_row.addWidget(self.naga_cfg_btn)
         naga_row.addStretch()
+
         right.addLayout(naga_row)
+        right.addSpacing(6)
 
         # Numpad grid widget
         self.numpad_widget = QWidget()
@@ -1865,12 +1871,16 @@ class MainWindow(QMainWindow):
 
         if self.is_naga_mode:
             # 3x4 layout (12 buttons, rows 0-3, cols 0-2)
+            # Width is 215px total to match standard numpad width (68 + 5 + 69 + 5 + 68 = 215)
+            col_widths = [68, 69, 68]
             for slot in range(1, 13):
                 row = (slot - 1) // 3
                 col = (slot - 1) % 3
+                w = col_widths[col]
+                h = 50
                 key_id = f"Naga_{slot}"
                 btn = ClickableLabel()
-                btn.setFixedSize(50, 50)
+                btn.setFixedSize(w, h)
                 btn.setAlignment(Qt.AlignmentFlag.AlignCenter)
                 btn.setText(str(slot))
                 btn.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
@@ -2125,10 +2135,23 @@ class MainWindow(QMainWindow):
             color = self.db.get(strategem_name, "Color", "Yellow")
             icon_path = self.icon_dir / color / (safe_filename(strategem_name) + ".png")
             if icon_path.exists():
-                pm = QPixmap(str(icon_path)).scaled(
-                    w, h, Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation
-                )
+                if w != h:
+                    scaled_dir = self.icon_dir / "scaled"
+                    scaled_dir.mkdir(exist_ok=True)
+                    scaled_path = scaled_dir / f"{safe_filename(strategem_name)}_{w}x{h}.png"
+                    if not scaled_path.exists():
+                        scale_icon_to_button(str(icon_path), w, h, str(scaled_path))
+                    if scaled_path.exists():
+                        pm = QPixmap(str(scaled_path))
+                    else:
+                        pm = QPixmap(str(icon_path)).scaled(
+                            w, h, Qt.AspectRatioMode.KeepAspectRatio,
+                            Qt.TransformationMode.SmoothTransformation)
+                else:
+                    pm = QPixmap(str(icon_path)).scaled(
+                        w, h, Qt.AspectRatioMode.KeepAspectRatio,
+                        Qt.TransformationMode.SmoothTransformation
+                    )
                 pm = self._stamp_label_on_pixmap(pm, label, w, h)
                 btn.setPixmap(pm)
                 btn.setText("")
