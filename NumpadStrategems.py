@@ -2256,14 +2256,6 @@ class MainWindow(QMainWindow):
             self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowStaysOnTopHint)
         self.show()
 
-    # ── Assignments persistence ──
-
-    def _load_assignments(self):
-        for key in self.numpad_buttons:
-            name = self.db.get_assignment(key)
-            if name:
-                self._update_numpad_button(key, name)
-
     # ── Settings bridge for hotkey manager ──
 
     def get_hotkey_settings(self) -> Tuple[bool, int, bool]:
@@ -2288,8 +2280,15 @@ class MainWindow(QMainWindow):
 
     def _reset_appdata(self):
         self.hotkey_mgr.stop()
+
+        # Flush all current state to Settings INI before resetting app data
+        self.settings.set("GUI", "NumpadX", self.x())
+        self.settings.set("GUI", "NumpadY", self.y())
+        self.settings.set("Settings", "KeyDelayMS", self.delay_display.text())
+        self.settings.set("Numpad", "NagaMode", int(self.is_naga_mode))
+        self.settings.save()
         
-        # Backup settings INI to temp location before reset
+        # Backup settings INI (preserves Naga mappings, evdev selection, device prefs, and GUI settings)
         settings_path = self.settings.path
         temp_settings = None
         if settings_path.exists():
@@ -2297,7 +2296,7 @@ class MainWindow(QMainWindow):
             temp_settings = Path(temp_dir) / "NumpadStrategems.ini"
             shutil.copy(str(settings_path), str(temp_settings))
         
-        # Delete entire app data directory
+        # Delete entire app data directory (clears cached HTML, icons, strategem assignments)
         try:
             shutil.rmtree(str(self.data_dir))
         except Exception:
