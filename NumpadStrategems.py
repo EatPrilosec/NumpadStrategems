@@ -1569,12 +1569,13 @@ class MainWindow(QMainWindow):
         right.addLayout(naga_row)
         right.addSpacing(6)
 
-        # Numpad grid widget
+        # Numpad grid widget (fixed size matching standard numpad: 215x270)
         self.numpad_widget = QWidget()
+        self.numpad_widget.setFixedSize(215, 270)
         self.numpad_grid = QGridLayout(self.numpad_widget)
         self.numpad_grid.setSpacing(5)
         self.numpad_grid.setContentsMargins(0, 0, 0, 0)
-        self.numpad_grid.setSizeConstraint(QGridLayout.SizeConstraint.SetMinAndMaxSize)
+        self.numpad_grid.setSizeConstraint(QGridLayout.SizeConstraint.SetFixedSize)
         self.numpad_widget.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 
         self._rebuild_numpad_grid()
@@ -1856,7 +1857,6 @@ class MainWindow(QMainWindow):
         self.settings.set("Numpad", "NagaMode", int(checked))
         self._rebuild_numpad_grid()
         self._deselect_all()
-        self.adjustSize()
 
     def _rebuild_numpad_grid(self):
         # Clear existing buttons from layout
@@ -1870,8 +1870,8 @@ class MainWindow(QMainWindow):
         self.selected_numpad_key = ""
 
         if self.is_naga_mode:
-            # 3x4 layout (12 buttons, rows 0-3, cols 0-2)
-            # Width is 215px total to match standard numpad width (68 + 5 + 69 + 5 + 68 = 215)
+            # 3x4 layout centered in 215x270 space (margins top=27, bottom=28 center 4 rows of 50px)
+            self.numpad_grid.setContentsMargins(0, 27, 0, 28)
             col_widths = [68, 69, 68]
             for slot in range(1, 13):
                 row = (slot - 1) // 3
@@ -1894,7 +1894,8 @@ class MainWindow(QMainWindow):
                 self.numpad_grid.addWidget(btn, row, col, 1, 1)
                 self.numpad_buttons[key_id] = btn
         else:
-            # Standard Numpad layout
+            # Standard Numpad layout (flush margins fill entire 215x270 space)
+            self.numpad_grid.setContentsMargins(0, 0, 0, 0)
             btn_defs = [
                 ("NumLock", 0, 0, 1, 1, 50, 50),
                 ("/",       0, 1, 1, 1, 50, 50),
