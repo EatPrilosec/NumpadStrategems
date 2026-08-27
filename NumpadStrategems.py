@@ -36,7 +36,7 @@ from dataclasses import dataclass, field
 from typing import Optional, Dict, List, Tuple
 
 # Version
-VERSION = "0.1.16"
+VERSION = "0.1.17"
 GITHUB_REPO = "EatPrilosec/NumpadStrategems"
 
 # ─── Third-party imports ────────────────────────────────────────────────────
@@ -90,6 +90,11 @@ except ImportError:
 
 SCRIPT_NAME = "NumpadStrategems"
 STEAM_URL = "https://steamcommunity.com/sharedfiles/filedetails/?id=3161075951"
+STEAM_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.5",
+}
 
 # Direction code image URL → letter mapping
 CODE_MAP = {
@@ -497,7 +502,10 @@ class InitWorker(QThread):
             self.icon_progress.emit("Placeholder Generation: Complete")
 
             # 3. Parse if needed
-            if was_downloaded or not self.db.ini_path.exists():
+            existing_strats = self.db.load_strategems()
+            need_parse = was_downloaded or not self.db.ini_path.exists() or len(existing_strats) == 0
+
+            if need_parse:
                 self._parse_html()
                 if not self._all_icons_organized():
                     self._download_icons()
@@ -507,7 +515,13 @@ class InitWorker(QThread):
                     self.download_progress.emit("Icon Download: Complete (cached)")
             else:
                 self.ini_progress.emit("DB Generation: Skipped (cached)")
-                self.strategems = self.db.load_strategems()
+                self.strategems = existing_strats
+                if not self._all_icons_organized():
+                    self._download_icons()
+                    self._detect_colors()
+                    self._organize_icons()
+                else:
+                    self.download_progress.emit("Icon Download: Complete (cached)")
 
             # 4. Check missing icons
             self._check_missing_icons()
@@ -523,14 +537,24 @@ class InitWorker(QThread):
         html_path = self.data_dir / "StrategmsRaw.html"
         need_download = not html_path.exists()
         if not need_download:
-            mtime = datetime.fromtimestamp(html_path.stat().st_mtime)
-            need_download = (datetime.now() - mtime) > timedelta(days=7)
+            try:
+                content = html_path.read_text(encoding="utf-8", errors="replace")
+                if len(content) < 1000 or "bb_table_tr" not in content:
+                    need_download = True
+                else:
+                    mtime = datetime.fromtimestamp(html_path.stat().st_mtime)
+                    need_download = (datetime.now() - mtime) > timedelta(days=7)
+            except Exception:
+                need_download = True
 
         if need_download:
             self.html_progress.emit("HTML Download: Downloading from Steam...")
             try:
-                resp = requests.get(STEAM_URL, timeout=30)
+                resp = requests.get(STEAM_URL, headers=STEAM_HEADERS, timeout=30)
                 resp.raise_for_status()
+                text = resp.text
+                if "bb_table_tr" not in text:
+                    raise ValueError("Steam response missing expected guide content")
                 html_path.write_bytes(resp.content)
                 self.html_progress.emit("HTML Download: Complete")
                 return True
@@ -555,11 +579,11 @@ class InitWorker(QThread):
         html_path = self.data_dir / "StrategmsRaw.html"
         if not html_path.exists():
             self.ini_progress.emit("DB Generation: No HTML file")
-            return
+            raise FileNotFoundError("StrategmsRaw.html does not exist")
         html = html_path.read_text(encoding="utf-8", errors="replace")
         if not html:
             self.ini_progress.emit("DB Generation: Empty HTML")
-            return
+            raise ValueError("StrategmsRaw.html is empty")
 
         # Collect section positions
         section_regex = re.compile(r'<div class="subSectionTitle">\s*(.*?)\s*</div>', re.DOTALL)
@@ -607,10 +631,15 @@ class InitWorker(QThread):
             href_m = href_regex.search(cells[0])
             if href_m:
                 icon_url = href_m.group(1)
+            else:
+                img_m = img_regex.search(cells[0])
+                if img_m:
+                    icon_url = img_m.group(1)
 
             code = ""
             for img_m in img_regex.finditer(cells[2]):
-                d = CODE_MAP.get(img_m.group(1), "")
+                src = img_m.group(1).split("?")[0]
+                d = CODE_MAP.get(src, "") or CODE_MAP.get(img_m.group(1), "")
                 code += d
 
             strategems.append(Strategem(
@@ -620,6 +649,10 @@ class InitWorker(QThread):
             count += 1
             if count % 10 == 0:
                 self.ini_progress.emit(f"DB Generation: {count} strategems...")
+
+        if not strategems:
+            self.ini_progress.emit("DB Generation: Failed (0 strategems found)")
+            raise RuntimeError("No strategems parsed from HTML")
 
         self.strategems = strategems
         self.db.save_strategems(strategems)
@@ -646,7 +679,7 @@ class InitWorker(QThread):
                 continue
 
             try:
-                resp = requests.get(s.icon_url, timeout=15)
+                resp = requests.get(s.icon_url, headers=STEAM_HEADERS, timeout=15)
                 resp.raise_for_status()
                 dest.write_bytes(resp.content)
                 downloaded += 1
@@ -697,10 +730,14 @@ class InitWorker(QThread):
         self.download_progress.emit(f"Organizing: Complete ({organized})")
 
     def _all_icons_organized(self) -> bool:
+        if not self.strategems:
+            return False
         for color in ("Yellow", "Red", "Green", "Blue"):
             if not (self.icon_dir / color).is_dir():
                 return False
         for s in self.strategems:
+            if not s.icon_url:
+                continue
             fname = safe_filename(s.name) + ".png"
             color = self.db.get(s.name, "Color", "Yellow")
             if not (self.icon_dir / color / fname).exists():
