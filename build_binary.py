@@ -42,7 +42,7 @@ def build_binary(version: str | None):
     # Use the spec file for cleaner, more reliable builds
     PyInstaller.__main__.run(['NumpadStrategems.spec'])
     
-    # Rename binary with version info
+    # Rename binary with version info (Match GitHub Actions naming: NumpadStrategems-<version>-<platform>[.exe])
     ext = ".exe" if system == "Windows" else ""
     src_name = f"NumpadStrategems{ext}"
     dst_name = f"NumpadStrategems-{version_str}-{platform_str}{ext}"
@@ -54,16 +54,7 @@ def build_binary(version: str | None):
     else:
         print(f"\nERROR: Expected binary not found at {src_path}")
 
-    # Match GitHub Actions naming: NumpadStrategems-<version>-<platform>[.exe]
-    ext = ".exe" if system == "Windows" else ""
-    src_name = f"NumpadStrategems{ext}"
-    dst_name = f"NumpadStrategems-{version_str}-{platform_str}{ext}"
-    src_path = os.path.join("dist", src_name)
-    dst_path = os.path.join("dist", dst_name)
-    if os.path.exists(src_path):
-        os.replace(src_path, dst_path)
-
-    print(f"\nBuild complete! Check the 'dist' folder for your binary:")
+    print(f"Check the 'dist' folder for your binary:")
     print(f"  {dst_name}")
 
 if __name__ == '__main__':

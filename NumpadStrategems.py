@@ -1230,7 +1230,7 @@ class DeviceSelectionDialog(QDialog):
             for device_path in evdev.list_devices():
                 try:
                     dev = evdev.InputDevice(device_path)
-                    if dev.name == "NumpadStrategems-vkbd":
+                    if dev.name == HotkeyManager.UINPUT_NAME:
                         dev.close()
                         continue
                     caps = dev.capabilities(verbose=False)
@@ -1582,28 +1582,26 @@ class MainWindow(QMainWindow):
         # ── Populate strategem grid ──
         self._populate_grid()
     def _update_input_status(self):
-        # Determine backend and status
-        status = ""
         mgr = self.hotkey_mgr
         status = None
         evdev_available = False
         pynput_available = False
-        if platform.system() == "Linux" and hasattr(mgr, "_ev_devices"):
-            if mgr._ev_devices and len(mgr._ev_devices) > 0:
-                status = f"evdev: grabbed {len(mgr._ev_devices)} device(s)"
-                evdev_available = True
-            else:
-                evdev_available = False
-        if hasattr(mgr, "_pynput_listener"):
-            if mgr._pynput_listener:
+
+        if platform.system() == "Linux" and hasattr(mgr, "_ev_devices") and mgr._ev_devices:
+            status = f"evdev: grabbed {len(mgr._ev_devices)} device(s)"
+            evdev_available = True
+
+        if hasattr(mgr, "_pynput_listener") and mgr._pynput_listener:
+            pynput_available = True
+            if not evdev_available:
                 status = "pynput: active"
-                pynput_available = True
-            else:
-                pynput_available = False
+
         if not evdev_available and not pynput_available:
             status = "failed to grab any devices"
+
         if status is None:
             status = "No hotkey backend"
+
         self.input_status_label.setText(status)
 
     def _populate_grid(self):
@@ -2025,7 +2023,10 @@ class MainWindow(QMainWindow):
             shutil.rmtree(str(temp_settings.parent))
         
         # Restart
-        os.execv(sys.executable, [sys.executable] + sys.argv)
+        if getattr(sys, "frozen", False):
+            os.execv(sys.executable, sys.argv)
+        else:
+            os.execv(sys.executable, [sys.executable] + sys.argv)
 
     # ── Save state on close ──
 
@@ -2556,10 +2557,12 @@ def check_and_elevate_if_needed():
     
     # Relaunch with pkexec
     try:
-        python_exe = sys.executable
-        script_path = os.path.abspath(__file__)
-        args = [python_exe, script_path, '--skip-passwordless-prompt'] + \
-               [arg for arg in sys.argv[1:] if arg != '--skip-passwordless-prompt']
+        clean_args = [arg for arg in sys.argv[1:] if arg != '--skip-passwordless-prompt']
+        if getattr(sys, 'frozen', False):
+            args = [sys.executable, '--skip-passwordless-prompt'] + clean_args
+        else:
+            script_path = os.path.abspath(__file__)
+            args = [sys.executable, script_path, '--skip-passwordless-prompt'] + clean_args
         
         # Use pkexec to relaunch with graphical password prompt
         os.execvp('pkexec', ['pkexec'] + args)
