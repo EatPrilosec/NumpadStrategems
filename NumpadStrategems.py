@@ -1548,8 +1548,42 @@ class MainWindow(QMainWindow):
         main_layout.setContentsMargins(5, 5, 5, 5)
         main_layout.setSpacing(10)
 
-        # ── Left: strategem grid container (fills available width and height) ──
+        # ── Left: strategem scroll area & container ──
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.scroll_area.setStyleSheet("""
+            QScrollArea {
+                border: none;
+                background: transparent;
+            }
+            QScrollBar:vertical {
+                background: #1e1e1e;
+                width: 8px;
+                margin: 0px;
+                border-radius: 4px;
+            }
+            QScrollBar::handle:vertical {
+                background: #555;
+                min-height: 25px;
+                border-radius: 4px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #777;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
+                background: none;
+            }
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
+                background: none;
+            }
+        """)
+
         self.grid_widget = QWidget()
+        self.grid_widget.setStyleSheet("background: transparent;")
         self.grid_layout = QVBoxLayout(self.grid_widget)
         self.grid_layout.setContentsMargins(0, 0, 0, 0)
         self.grid_layout.setSpacing(0)
@@ -1569,7 +1603,8 @@ class MainWindow(QMainWindow):
             if cat != "Blue":
                 self.grid_layout.addStretch(1)
 
-        main_layout.addWidget(self.grid_widget, 1)
+        self.scroll_area.setWidget(self.grid_widget)
+        main_layout.addWidget(self.scroll_area, 1)
 
         # ── Right: numpad + controls container ──
         self.right_widget = QWidget()
@@ -1758,7 +1793,8 @@ class MainWindow(QMainWindow):
         self._update_reflow_for_width(ev.size().width())
 
     def _update_reflow_for_width(self, win_w: int):
-        available_w = win_w - 240  # 10 margins + 10 spacing + 220 right panel
+        scrollbar_w = 8 if hasattr(self, "scroll_area") and self.scroll_area.verticalScrollBar().isVisible() else 0
+        available_w = win_w - 240 - scrollbar_w  # 10 margins + 10 spacing + 220 right panel + scrollbar
         if available_w > 0:
             new_items = max(MIN_ITEMS_PER_ROW, (available_w + ICON_SPACING) // (ICON_SIZE + ICON_SPACING))
             if new_items != self.current_items_per_row:
