@@ -45,7 +45,7 @@ try:
     from PyQt6.QtWidgets import (
         QApplication, QMainWindow, QWidget, QLabel, QPushButton, QCheckBox,
         QGridLayout, QVBoxLayout, QHBoxLayout, QFrame, QToolTip, QMessageBox,
-        QDialog, QSizePolicy, QScrollArea, QSpacerItem
+        QDialog, QSizePolicy, QScrollArea, QSpacerItem, QComboBox
     )
     from PyQt6.QtCore import (
         Qt, QTimer, QThread, pyqtSignal, QPoint, QSize, QRect, QEvent
@@ -117,6 +117,34 @@ ICON_SIZE = 50
 ICON_SPACING = 5
 DARK_BG = "#1e1e1e"
 DARK_BG_RGB = (30, 30, 30)
+
+# Razer Naga default mappings: buttons 1-9 -> numpad 1-9, 10 -> numpad 0, 11 -> numpad ., 12 -> numpad Enter
+DEFAULT_NAGA_MAPPINGS = {
+    1: "1", 2: "2", 3: "3",
+    4: "4", 5: "5", 6: "6",
+    7: "7", 8: "8", 9: "9",
+    10: "0", 11: ".", 12: "Enter",
+}
+
+NAGA_KEY_CHOICES = [
+    ("1", "Numpad 1"),
+    ("2", "Numpad 2"),
+    ("3", "Numpad 3"),
+    ("4", "Numpad 4"),
+    ("5", "Numpad 5"),
+    ("6", "Numpad 6"),
+    ("7", "Numpad 7"),
+    ("8", "Numpad 8"),
+    ("9", "Numpad 9"),
+    ("0", "Numpad 0"),
+    (".", "Numpad . (Period)"),
+    ("Enter", "Numpad Enter"),
+    ("+", "Numpad +"),
+    ("-", "Numpad -"),
+    ("*", "Numpad *"),
+    ("/", "Numpad /"),
+    ("NumLock", "Numpad NumLock"),
+]
 
 # Numpad virtual-key → button id maps  (pynput key.vk values)
 if platform.system() == "Windows":
@@ -237,6 +265,10 @@ class Settings:
         self.config["Numpad"] = {
             "AlwaysOnTop": "0",
             "ArrowKeys": "1",
+            "NagaMode": "0",
+        }
+        self.config["Naga"] = {
+            f"NagaMap_{k}": v for k, v in DEFAULT_NAGA_MAPPINGS.items()
         }
         self.config["GUI"] = {}
         self.config["Devices"] = {}
@@ -1255,6 +1287,101 @@ class DeviceSelectionDialog(QDialog):
         return selected if selected else None
 
 
+# ─── Naga configuration dialog ──────────────────────────────────────────────
+
+class NagaConfigDialog(QDialog):
+    """Dialog to configure mapping for the 12 Razer Naga side buttons."""
+
+    def __init__(self, settings: Settings, parent=None):
+        super().__init__(parent)
+        self.settings = settings
+        self.combos: Dict[int, QComboBox] = {}
+        self.setWindowTitle("Configure Naga Mappings")
+        self.setStyleSheet(f"background-color: {DARK_BG}; color: white;")
+        self.setMinimumWidth(440)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
+
+        instr = QLabel("Map each Razer Naga button (1–12) to its corresponding Numpad key:")
+        instr.setStyleSheet("color: #ccc; font-size: 11px;")
+        instr.setWordWrap(True)
+        layout.addWidget(instr)
+
+        # 2 columns of 6 buttons each
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(16)
+        grid.setVerticalSpacing(8)
+
+        for slot in range(1, 13):
+            col_offset = 0 if slot <= 6 else 3
+            row = (slot - 1) % 6
+
+            lbl = QLabel(f"Naga {slot:2d}:")
+            lbl.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+            lbl.setStyleSheet("color: #FFD700;")
+            grid.addWidget(lbl, row, col_offset)
+
+            combo = QComboBox()
+            combo.setStyleSheet(
+                "QComboBox { background-color: #2a2a2a; color: white; border: 1px solid #555; padding: 4px 8px; border-radius: 3px; }"
+                "QComboBox QAbstractItemView { background-color: #2a2a2a; color: white; selection-background-color: #FFD700; selection-color: black; }"
+            )
+            current_target = self.settings.get("Naga", f"NagaMap_{slot}", DEFAULT_NAGA_MAPPINGS.get(slot, str(slot)))
+            for key_val, key_label in NAGA_KEY_CHOICES:
+                combo.addItem(key_label, key_val)
+                if key_val == current_target:
+                    combo.setCurrentIndex(combo.count() - 1)
+
+            self.combos[slot] = combo
+            grid.addWidget(combo, row, col_offset + 1)
+
+        layout.addLayout(grid)
+
+        # Button row: Reset Defaults on left, Save/Cancel on right
+        btn_layout = QHBoxLayout()
+        reset_btn = QPushButton("Reset Defaults")
+        reset_btn.setStyleSheet(
+            "QPushButton { background-color: #444; color: white; padding: 6px 14px; border: 1px solid #666; border-radius: 3px; }"
+            "QPushButton:hover { background-color: #555; }"
+        )
+        reset_btn.clicked.connect(self._reset_defaults)
+        btn_layout.addWidget(reset_btn)
+
+        btn_layout.addStretch()
+
+        ok_btn = QPushButton("Save")
+        ok_btn.setStyleSheet(
+            "QPushButton { background-color: #555; color: white; padding: 6px 20px; border: 1px solid #777; border-radius: 3px; font-weight: bold; }"
+            "QPushButton:hover { background-color: #666; }"
+        )
+        ok_btn.clicked.connect(self._save_and_accept)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setStyleSheet(
+            "QPushButton { background-color: #333; color: white; padding: 6px 16px; border: 1px solid #555; border-radius: 3px; }"
+            "QPushButton:hover { background-color: #444; }"
+        )
+        cancel_btn.clicked.connect(self.reject)
+
+        btn_layout.addWidget(ok_btn)
+        btn_layout.addWidget(cancel_btn)
+        layout.addLayout(btn_layout)
+
+    def _reset_defaults(self):
+        for slot, combo in self.combos.items():
+            default_key = DEFAULT_NAGA_MAPPINGS.get(slot, str(slot))
+            idx = combo.findData(default_key)
+            if idx >= 0:
+                combo.setCurrentIndex(idx)
+
+    def _save_and_accept(self):
+        for slot, combo in self.combos.items():
+            target_key = combo.currentData()
+            self.settings.set("Naga", f"NagaMap_{slot}", target_key)
+        self.accept()
+
+
 # ─── Status window ──────────────────────────────────────────────────────────
 
 class StatusWindow(QDialog):
@@ -1359,6 +1486,7 @@ class MainWindow(QMainWindow):
         self.hotkey_mgr = hotkey_mgr
         self.icon_dir = data_dir / "icons"
 
+        self.is_naga_mode = self.settings.getbool("Numpad", "NagaMode", False)
         self.selected_strategem: str = ""
         self.selected_numpad_key: str = ""
         self.strat_buttons: Dict[str, ClickableLabel] = {}
@@ -1414,61 +1542,37 @@ class MainWindow(QMainWindow):
         right.setSpacing(5)
         main_layout.addLayout(right, 0)
 
-        # Numpad grid
-        numpad_widget = QWidget()
-        numpad_grid = QGridLayout(numpad_widget)
-        numpad_grid.setSpacing(5)
-        numpad_grid.setContentsMargins(0, 0, 0, 0)
-        numpad_grid.setSizeConstraint(QGridLayout.SizeConstraint.SetMinAndMaxSize)
+        # ── NagaMode toggle row above numpad ──
+        naga_row = QHBoxLayout()
+        self.naga_mode_cb = QCheckBox("NagaMode")
+        self.naga_mode_cb.setFont(QFont("Segoe UI", 10))
+        self.naga_mode_cb.setStyleSheet("color: white;")
+        self.naga_mode_cb.setChecked(self.is_naga_mode)
+        self.naga_mode_cb.toggled.connect(self._toggle_naga_mode)
+        naga_row.addWidget(self.naga_mode_cb)
 
-        # Create numpad buttons
-        btn_defs = [
-            # (key, row, col, rowspan, colspan, width, height)
-            ("NumLock", 0, 0, 1, 1, 50, 50),
-            ("/",       0, 1, 1, 1, 50, 50),
-            ("*",       0, 2, 1, 1, 50, 50),
-            ("-",       0, 3, 1, 1, 50, 50),
-            ("7",       1, 0, 1, 1, 50, 50),
-            ("8",       1, 1, 1, 1, 50, 50),
-            ("9",       1, 2, 1, 1, 50, 50),
-            ("+",       1, 3, 2, 1, 50, 105),
-            ("4",       2, 0, 1, 1, 50, 50),
-            ("5",       2, 1, 1, 1, 50, 50),
-            ("6",       2, 2, 1, 1, 50, 50),
-            ("1",       3, 0, 1, 1, 50, 50),
-            ("2",       3, 1, 1, 1, 50, 50),
-            ("3",       3, 2, 1, 1, 50, 50),
-            ("Enter",   3, 3, 2, 1, 50, 105),
-            ("0",       4, 0, 1, 2, 105, 50),
-            (".",       4, 2, 1, 1, 50, 50),
-        ]
+        self.naga_cfg_btn = QPushButton("⚙")
+        self.naga_cfg_btn.setFixedSize(24, 24)
+        self.naga_cfg_btn.setToolTip("Configure Naga Mappings")
+        self.naga_cfg_btn.setStyleSheet(
+            "QPushButton { color: white; background-color: #333; border: 1px solid #555; border-radius: 3px; font-size: 13px; }"
+            "QPushButton:hover { background-color: #444; border-color: #777; }"
+        )
+        self.naga_cfg_btn.clicked.connect(self._open_naga_config)
+        naga_row.addWidget(self.naga_cfg_btn)
+        naga_row.addStretch()
+        right.addLayout(naga_row)
 
-        display_labels = {
-            "NumLock": "NL", "/": "/", "*": "*", "-": "-",
-            "7": "7", "8": "8", "9": "9", "+": "+",
-            "4": "4", "5": "5", "6": "6",
-            "1": "1", "2": "2", "3": "3", "Enter": "En",
-            "0": "0", ".": ".",
-        }
+        # Numpad grid widget
+        self.numpad_widget = QWidget()
+        self.numpad_grid = QGridLayout(self.numpad_widget)
+        self.numpad_grid.setSpacing(5)
+        self.numpad_grid.setContentsMargins(0, 0, 0, 0)
+        self.numpad_grid.setSizeConstraint(QGridLayout.SizeConstraint.SetMinAndMaxSize)
+        self.numpad_widget.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
 
-        for key, r, c, rs, cs, w, h in btn_defs:
-            btn = ClickableLabel()
-            btn.setFixedSize(w, h)
-            btn.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            btn.setText(display_labels.get(key, key))
-            btn.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
-            btn.setStyleSheet(
-                "border: 1px solid #555; color: white; background-color: #2a2a2a;"
-            )
-            btn.clicked.connect(lambda k=key: self._numpad_clicked(k))
-            btn.right_clicked.connect(lambda k=key: self._numpad_right_clicked(k))
-            btn.entered.connect(lambda k=key: self._show_numpad_info(k))
-            btn.left.connect(self._clear_info)
-            numpad_grid.addWidget(btn, r, c, rs, cs)
-            self.numpad_buttons[key] = btn
-
-        numpad_widget.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
-        right.addWidget(numpad_widget)
+        self._rebuild_numpad_grid()
+        right.addWidget(self.numpad_widget)
 
         # ── Delay control ──
         delay_row = QHBoxLayout()
@@ -1730,12 +1834,117 @@ class MainWindow(QMainWindow):
                 regular.append(s)
         return regular + sentries
 
+    # ── NagaMode and Numpad Grid Rebuilding ──
+
+    def _get_naga_mapping(self, slot: int) -> str:
+        return self.settings.get("Naga", f"NagaMap_{slot}", DEFAULT_NAGA_MAPPINGS.get(slot, str(slot)))
+
+    def _open_naga_config(self):
+        dialog = NagaConfigDialog(self.settings, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            if self.is_naga_mode:
+                self._load_assignments()
+
+    def _toggle_naga_mode(self, checked: bool):
+        self.is_naga_mode = bool(checked)
+        self.settings.set("Numpad", "NagaMode", int(checked))
+        self._rebuild_numpad_grid()
+        self._deselect_all()
+        self.adjustSize()
+
+    def _rebuild_numpad_grid(self):
+        # Clear existing buttons from layout
+        while self.numpad_grid.count():
+            item = self.numpad_grid.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.setParent(None)
+                widget.deleteLater()
+        self.numpad_buttons.clear()
+        self.selected_numpad_key = ""
+
+        if self.is_naga_mode:
+            # 3x4 layout (12 buttons, rows 0-3, cols 0-2)
+            for slot in range(1, 13):
+                row = (slot - 1) // 3
+                col = (slot - 1) % 3
+                key_id = f"Naga_{slot}"
+                btn = ClickableLabel()
+                btn.setFixedSize(50, 50)
+                btn.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                btn.setText(str(slot))
+                btn.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
+                btn.setStyleSheet(
+                    "border: 1px solid #555; color: white; background-color: #2a2a2a;"
+                )
+                btn.clicked.connect(lambda s=slot: self._naga_clicked(s))
+                btn.right_clicked.connect(lambda s=slot: self._naga_right_clicked(s))
+                btn.entered.connect(lambda s=slot: self._show_naga_info(s))
+                btn.left.connect(self._clear_info)
+                self.numpad_grid.addWidget(btn, row, col, 1, 1)
+                self.numpad_buttons[key_id] = btn
+        else:
+            # Standard Numpad layout
+            btn_defs = [
+                ("NumLock", 0, 0, 1, 1, 50, 50),
+                ("/",       0, 1, 1, 1, 50, 50),
+                ("*",       0, 2, 1, 1, 50, 50),
+                ("-",       0, 3, 1, 1, 50, 50),
+                ("7",       1, 0, 1, 1, 50, 50),
+                ("8",       1, 1, 1, 1, 50, 50),
+                ("9",       1, 2, 1, 1, 50, 50),
+                ("+",       1, 3, 2, 1, 50, 105),
+                ("4",       2, 0, 1, 1, 50, 50),
+                ("5",       2, 1, 1, 1, 50, 50),
+                ("6",       2, 2, 1, 1, 50, 50),
+                ("1",       3, 0, 1, 1, 50, 50),
+                ("2",       3, 1, 1, 1, 50, 50),
+                ("3",       3, 2, 1, 1, 50, 50),
+                ("Enter",   3, 3, 2, 1, 50, 105),
+                ("0",       4, 0, 1, 2, 105, 50),
+                (".",       4, 2, 1, 1, 50, 50),
+            ]
+            for key, r, c, rs, cs, w, h in btn_defs:
+                btn = ClickableLabel()
+                btn.setFixedSize(w, h)
+                btn.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                btn.setText(self._NUMPAD_DISPLAY.get(key, key))
+                btn.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
+                btn.setStyleSheet(
+                    "border: 1px solid #555; color: white; background-color: #2a2a2a;"
+                )
+                btn.clicked.connect(lambda k=key: self._numpad_clicked(k))
+                btn.right_clicked.connect(lambda k=key: self._numpad_right_clicked(k))
+                btn.entered.connect(lambda k=key: self._show_numpad_info(k))
+                btn.left.connect(self._clear_info)
+                self.numpad_grid.addWidget(btn, r, c, rs, cs)
+                self.numpad_buttons[key] = btn
+
+        self._load_assignments()
+
+    def _load_assignments(self):
+        if self.is_naga_mode:
+            for slot in range(1, 13):
+                target_key = self._get_naga_mapping(slot)
+                name = self.db.get_assignment(target_key)
+                self._update_naga_button(slot, name)
+        else:
+            for key in self.numpad_buttons:
+                name = self.db.get_assignment(key)
+                if name:
+                    self._update_numpad_button(key, name)
+
     # ── Click handlers ──
 
     def _strat_clicked(self, name: str):
         if self.selected_numpad_key:
-            # Numpad already selected → assign
-            self._assign(name, self.selected_numpad_key)
+            if self.selected_numpad_key.startswith("Naga_"):
+                slot = int(self.selected_numpad_key.split("_")[1])
+                target_key = self._get_naga_mapping(slot)
+                self.db.set_assignment(target_key, name)
+                self._update_naga_button(slot, name)
+            else:
+                self._assign(name, self.selected_numpad_key)
             self._deselect_all()
         elif self.selected_strategem == name:
             # Clicking same strategem deselects
@@ -1767,6 +1976,42 @@ class MainWindow(QMainWindow):
         self.db.set_assignment(key, "__None__")
         self._update_numpad_button(key, "__None__")
         self._deselect_all()
+
+    def _naga_clicked(self, slot: int):
+        target_key = self._get_naga_mapping(slot)
+        key_id = f"Naga_{slot}"
+        if self.selected_strategem:
+            # Strategem already selected → assign to target_key
+            self.db.set_assignment(target_key, self.selected_strategem)
+            self._update_naga_button(slot, self.selected_strategem)
+            self._deselect_all()
+        elif self.selected_numpad_key == key_id:
+            self._deselect_all()
+        else:
+            self._deselect_all()
+            self.selected_numpad_key = key_id
+            if key_id in self.numpad_buttons:
+                self.numpad_buttons[key_id].setStyleSheet(
+                    "border: 2px solid #FFD700; color: white; background-color: #2a2a2a;"
+                )
+
+    def _naga_right_clicked(self, slot: int):
+        target_key = self._get_naga_mapping(slot)
+        self.db.set_assignment(target_key, "__None__")
+        self._update_naga_button(slot, "__None__")
+        self._deselect_all()
+
+    def _show_naga_info(self, slot: int):
+        target_key = self._get_naga_mapping(slot)
+        name = self.db.get_assignment(target_key)
+        if name and name != "__None__":
+            self._show_strat_info(name)
+            self.info_assignment.setText(f"Naga {slot} (Numpad {target_key})")
+        else:
+            self.info_name.setText(f"Naga {slot}")
+            self.info_warbond.setText("")
+            self.info_assignment.setText(f"Not assigned (Numpad {target_key})")
+            self._clear_arrows()
 
     def _deselect_all(self):
         if self.selected_strategem and self.selected_strategem in self.strat_buttons:
@@ -1867,6 +2112,37 @@ class MainWindow(QMainWindow):
             "border: 1px solid #555; color: white; background-color: #2a2a2a;"
         )
 
+    def _update_naga_button(self, slot: int, strategem_name: str):
+        key_id = f"Naga_{slot}"
+        btn = self.numpad_buttons.get(key_id)
+        if not btn:
+            return
+
+        w, h = btn.width(), btn.height()
+        label = str(slot)
+
+        if strategem_name and strategem_name != "__None__":
+            color = self.db.get(strategem_name, "Color", "Yellow")
+            icon_path = self.icon_dir / color / (safe_filename(strategem_name) + ".png")
+            if icon_path.exists():
+                pm = QPixmap(str(icon_path)).scaled(
+                    w, h, Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation
+                )
+                pm = self._stamp_label_on_pixmap(pm, label, w, h)
+                btn.setPixmap(pm)
+                btn.setText("")
+            else:
+                btn.setPixmap(QPixmap())
+                btn.setText("?")
+        else:
+            btn.setPixmap(QPixmap())
+            btn.setText(label)
+
+        btn.setStyleSheet(
+            "border: 1px solid #555; color: white; background-color: #2a2a2a;"
+        )
+
     def _on_device_status_clicked(self):
         """Show device selection dialog on evdev status click."""
         mgr = self.hotkey_mgr
@@ -1891,7 +2167,18 @@ class MainWindow(QMainWindow):
         warbond = self.db.get(name, "Warbond", "General")
         self.info_warbond.setText(warbond if warbond != "General" else "")
         assignment = self.db.find_assignment_for(name)
-        self.info_assignment.setText(f"Numpad {assignment}" if assignment else "")
+        if assignment:
+            if self.is_naga_mode:
+                naga_slots = [s for s in range(1, 13) if self._get_naga_mapping(s) == assignment]
+                if naga_slots:
+                    slot_str = "/".join(str(s) for s in naga_slots)
+                    self.info_assignment.setText(f"Naga {slot_str} (Numpad {assignment})")
+                else:
+                    self.info_assignment.setText(f"Numpad {assignment}")
+            else:
+                self.info_assignment.setText(f"Numpad {assignment}")
+        else:
+            self.info_assignment.setText("")
         code = self.db.get(name, "Code")
         self._show_arrows(code)
 
