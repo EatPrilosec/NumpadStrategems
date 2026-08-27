@@ -1529,6 +1529,8 @@ class MainWindow(QMainWindow):
         else:
             self.resize(DEFAULT_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT)
 
+        self._update_reflow_for_width(self.width())
+
         # Restore position
         x = settings.get("GUI", "NumpadX")
         y = settings.get("GUI", "NumpadY")
@@ -1747,11 +1749,18 @@ class MainWindow(QMainWindow):
         # ── Populate strategem grid ──
         self._populate_grid()
 
+    def showEvent(self, ev):
+        super().showEvent(ev)
+        self._update_reflow_for_width(self.width())
+
     def resizeEvent(self, ev):
         super().resizeEvent(ev)
-        grid_w = self.grid_widget.width()
-        if grid_w > 50:
-            new_items = max(MIN_ITEMS_PER_ROW, (grid_w + ICON_SPACING) // (ICON_SIZE + ICON_SPACING))
+        self._update_reflow_for_width(ev.size().width())
+
+    def _update_reflow_for_width(self, win_w: int):
+        available_w = win_w - 240  # 10 margins + 10 spacing + 220 right panel
+        if available_w > 0:
+            new_items = max(MIN_ITEMS_PER_ROW, (available_w + ICON_SPACING) // (ICON_SIZE + ICON_SPACING))
             if new_items != self.current_items_per_row:
                 self.current_items_per_row = new_items
                 self._reflow_grid()
