@@ -36,7 +36,7 @@ from dataclasses import dataclass, field
 from typing import Optional, Dict, List, Tuple
 
 # Version
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 GITHUB_REPO = "EatPrilosec/NumpadStrategems"
 
 # ─── Third-party imports ────────────────────────────────────────────────────
@@ -809,13 +809,26 @@ class InitWorker(QThread):
             self.download_progress.emit(f"Icon Check: {missing} icons missing")
 
 
+# ─── Device helper functions (Linux) ────────────────────────────────────────
+
+def _is_virtual_device(name: str) -> bool:
+    """Check if device is a virtual or remapped device."""
+    n = name.lower()
+    return any(v in n for v in ("input-remapper", "inputmapper", "piper", "kmonad", "keyd", "virtual", "uinput"))
+
+def _is_our_virtual_device(name: str) -> bool:
+    """Check if device is our own uinput virtual keyboard."""
+    return name == HotkeyManager.UINPUT_NAME
+
+
 # ─── Hotkey manager ─────────────────────────────────────────────────────────
 
 class HotkeyManager:
     """Listens for Ctrl+Numpad keys and executes strategem codes.
 
-    On Linux/Wayland: uses evdev to grab ALL keyboard devices exclusively,
+    On Linux/Wayland: uses evdev to grab keyboard/remapper devices exclusively,
     intercepts Ctrl+Numpad combos, and re-emits everything else via uinput.
+    Features dynamic hotplugging, per-device error isolation, and crash-proof fail-safe ungrab.
     On Windows: uses pynput.
     """
 
@@ -829,13 +842,16 @@ class HotkeyManager:
         self._executing = False
         self._running = False
 
-        # evdev state (Linux) – now supports multiple grabbed devices
+        # evdev state (Linux) – supports dynamic multi-device grab and hotplug
         self._ev_devices: list = []   # list of grabbed InputDevice
         self._ev_uinput = None
-        self._ev_lock = threading.Lock()
+        self._ev_lock = threading.Lock()     # lock for uinput writes
+        self._dev_lock = threading.Lock()    # lock for device list / selector operations
         self._ev_thread = None
         self._ev_selector = None
         self._ev_ctrl_down = set()
+        self._ev_last_scan_time = 0.0
+        self._last_heartbeat = time.time()
 
         # pynput state (Windows)
         self._pynput_listener = None
@@ -847,9 +863,10 @@ class HotkeyManager:
         if not self.settings:
             return None
         paths = set()
-        for key, val in self.settings.config.items("Devices"):
-            if key.startswith("path_") and val == "1":
-                paths.add(key[5:])
+        if self.settings.config.has_section("Devices"):
+            for key, val in self.settings.config.items("Devices"):
+                if key.startswith("path_") and val == "1":
+                    paths.add(key[5:])
         return paths if paths else None
 
     def set_selected_device_paths(self, paths: Optional[set]):
@@ -873,8 +890,25 @@ class HotkeyManager:
             # They will be preserved across resets automatically
             pass
 
+    def is_healthy(self) -> bool:
+        """Check if the hotkey worker is alive and responsive."""
+        if not self._running:
+            return True
+        if platform.system() == "Linux" and HAS_EVDEV:
+            if self._ev_thread and self._ev_thread.is_alive():
+                return (time.time() - self._last_heartbeat) < 5.0
+            return False
+        return True
+
+    def restart_evdev(self):
+        """Safely restart the evdev listener backend."""
+        self.stop()
+        time.sleep(0.2)
+        self.start()
+
     def start(self):
         self._running = True
+        self._last_heartbeat = time.time()
         import atexit
         atexit.register(self.stop)
 
@@ -895,25 +929,48 @@ class HotkeyManager:
 
     # ─── evdev backend (Linux / Wayland) ────────────────────────────────
 
+    def _create_uinput(self, devices: list) -> bool:
+        """Safely create a virtual uinput device merging capabilities of grabbed devices."""
+        if not devices:
+            return False
+        try:
+            with self._ev_lock:
+                if self._ev_uinput:
+                    try:
+                        self._ev_uinput.close()
+                    except Exception:
+                        pass
+                    self._ev_uinput = None
+
+                self._ev_uinput = evdev.UInput.from_device(
+                    *devices, name=self.UINPUT_NAME
+                )
+            return True
+        except Exception as e:
+            print(f"evdev: failed to create uinput device: {e}")
+            return False
+
     def _start_evdev(self) -> bool:
         try:
-            # Collect ALL keyboard-like devices (skip our own virtual keyboard)
+            # Collect candidate devices (skip our own virtual keyboard)
             candidates = []
             for path in evdev.list_devices():
-                dev = evdev.InputDevice(path)
-                if dev.name == self.UINPUT_NAME:
-                    dev.close()
-                    continue
-                caps = dev.capabilities(verbose=False)
-                key_caps = set(caps.get(ec.EV_KEY, []))
-                # Accept any device that has keyboard keys we care about
-                has_numpad = bool(key_caps & set(_EV_NUMPAD_MAP.keys()))
-                has_ctrl = bool(key_caps & _EV_CTRL_CODES)
-                has_wasd = bool(key_caps & set(_EV_WASD_KEYS.values()))
-                if has_numpad or has_ctrl or has_wasd:
-                    candidates.append(dev)
-                else:
-                    dev.close()
+                try:
+                    dev = evdev.InputDevice(path)
+                    if _is_our_virtual_device(dev.name):
+                        dev.close()
+                        continue
+                    caps = dev.capabilities(verbose=False)
+                    key_caps = set(caps.get(ec.EV_KEY, []))
+                    has_numpad = bool(key_caps & set(_EV_NUMPAD_MAP.keys()))
+                    has_ctrl = bool(key_caps & _EV_CTRL_CODES)
+                    has_wasd = bool(key_caps & set(_EV_WASD_KEYS.values()))
+                    if has_numpad or has_ctrl or has_wasd:
+                        candidates.append(dev)
+                    else:
+                        dev.close()
+                except Exception:
+                    pass
 
             if not candidates:
                 print("No keyboard/input devices found")
@@ -922,47 +979,53 @@ class HotkeyManager:
             # Filter devices based on user selection
             selected_paths = self.get_selected_device_paths()
             if selected_paths is None:
-                # First time or "grab all" mode
+                # "Grab all" mode
                 devices_to_grab = candidates
             else:
                 devices_to_grab = [dev for dev in candidates if dev.path in selected_paths]
                 for dev in candidates:
                     if dev not in devices_to_grab:
-                        dev.close()
+                        try:
+                            dev.close()
+                        except Exception:
+                            pass
 
             if not devices_to_grab:
                 print("No selected devices to grab")
-                for dev in candidates:
-                    dev.close()
                 return False
 
-            # Create virtual keyboard that merges capabilities of selected devices
-            self._ev_uinput = evdev.UInput.from_device(
-                *devices_to_grab, name=self.UINPUT_NAME
-            )
+            # Initialize selector and device list
+            with self._dev_lock:
+                self._ev_selector = selectors.DefaultSelector()
+                self._ev_devices.clear()
 
-            # Grab selected devices exclusively
-            for dev in devices_to_grab:
-                try:
-                    dev.grab()
-                    self._ev_devices.append(dev)
-                    print(f"evdev: grabbed '{dev.name}' ({dev.path})")
-                except Exception as e:
-                    print(f"evdev: failed to grab '{dev.name}': {e}")
-                    dev.close()
+                # Grab selected devices exclusively with per-device error protection
+                for dev in devices_to_grab:
+                    try:
+                        dev.grab()
+                        self._ev_devices.append(dev)
+                        self._ev_selector.register(dev, selectors.EVENT_READ)
+                        print(f"evdev: grabbed '{dev.name}' ({dev.path})")
+                    except Exception as e:
+                        print(f"evdev: skipped/failed to grab '{dev.name}': {e}")
+                        try:
+                            dev.close()
+                        except Exception:
+                            pass
 
             if not self._ev_devices:
                 print("Failed to grab any devices")
-                if self._ev_uinput:
-                    self._ev_uinput.close()
-                    self._ev_uinput = None
+                self._emergency_ungrab_all()
                 return False
 
-            # Set up selector to poll all devices
-            self._ev_selector = selectors.DefaultSelector()
-            for dev in self._ev_devices:
-                self._ev_selector.register(dev, selectors.EVENT_READ)
+            # Create virtual keyboard that merges capabilities of grabbed devices
+            if not self._create_uinput(self._ev_devices):
+                print("Failed to initialize uinput device")
+                self._emergency_ungrab_all()
+                return False
 
+            self._last_heartbeat = time.time()
+            self._ev_last_scan_time = time.time()
             self._ev_thread = threading.Thread(target=self._evdev_loop, daemon=True)
             self._ev_thread.start()
             return True
@@ -977,15 +1040,111 @@ class HotkeyManager:
             print(f"evdev init error: {e}")
             return False
 
+    def _remove_device(self, device):
+        """Safely remove a disconnected device without disrupting other devices."""
+        with self._dev_lock:
+            if self._ev_selector:
+                try:
+                    self._ev_selector.unregister(device)
+                except Exception:
+                    pass
+            try:
+                device.ungrab()
+            except Exception:
+                pass
+            try:
+                device.close()
+            except Exception:
+                pass
+            if device in self._ev_devices:
+                self._ev_devices.remove(device)
+
+    def _add_device(self, dev) -> bool:
+        """Safely grab and register a newly connected device."""
+        with self._dev_lock:
+            try:
+                dev.grab()
+                self._ev_devices.append(dev)
+                if self._ev_selector:
+                    self._ev_selector.register(dev, selectors.EVENT_READ)
+                print(f"evdev: dynamically grabbed '{dev.name}' ({dev.path})")
+                if not self._ev_uinput:
+                    self._create_uinput(self._ev_devices)
+                return True
+            except Exception as e:
+                print(f"evdev: failed to grab dynamic device '{dev.name}': {e}")
+                try:
+                    dev.close()
+                except Exception:
+                    pass
+                return False
+
+    def _check_for_new_devices(self):
+        """Scans for newly added or reconnected devices (e.g. input-remapper restarts)."""
+        if not self._running or platform.system() != "Linux" or not HAS_EVDEV:
+            return
+        try:
+            with self._dev_lock:
+                current_paths = {d.path for d in self._ev_devices}
+            available_paths = set(evdev.list_devices())
+            new_paths = available_paths - current_paths
+            if not new_paths:
+                return
+
+            selected_paths = self.get_selected_device_paths()
+
+            for path in new_paths:
+                try:
+                    dev = evdev.InputDevice(path)
+                    if _is_our_virtual_device(dev.name):
+                        dev.close()
+                        continue
+
+                    # If user selected specific paths, check if path matches or if it's a remapper virtual device
+                    if selected_paths is not None and path not in selected_paths:
+                        if not _is_virtual_device(dev.name):
+                            dev.close()
+                            continue
+
+                    caps = dev.capabilities(verbose=False)
+                    key_caps = set(caps.get(ec.EV_KEY, []))
+                    has_numpad = bool(key_caps & set(_EV_NUMPAD_MAP.keys()))
+                    has_ctrl = bool(key_caps & _EV_CTRL_CODES)
+                    has_wasd = bool(key_caps & set(_EV_WASD_KEYS.values()))
+                    if has_numpad or has_ctrl or has_wasd:
+                        self._add_device(dev)
+                    else:
+                        dev.close()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
     def _evdev_loop(self):
         """Read events from ALL grabbed devices and forward non-intercepted ones."""
         try:
             while self._running:
-                # Exit if selector was closed during device change
-                if not self._ev_selector or not self._ev_devices:
-                    break
-                # Block up to 0.5s waiting for events from any device
-                events = self._ev_selector.select(timeout=0.5)
+                self._last_heartbeat = time.time()
+
+                # Periodic hotplug & remapper auto-reconnect check (every ~1.5s)
+                now = time.time()
+                if now - self._ev_last_scan_time > 1.5:
+                    self._ev_last_scan_time = now
+                    self._check_for_new_devices()
+
+                with self._dev_lock:
+                    selector = self._ev_selector
+                    has_devices = bool(self._ev_devices)
+
+                if not selector or not has_devices:
+                    time.sleep(0.2)
+                    continue
+
+                try:
+                    events = selector.select(timeout=0.5)
+                except (OSError, ValueError):
+                    continue
+
                 for key, _mask in events:
                     device = key.fileobj
                     try:
@@ -993,13 +1152,21 @@ class HotkeyManager:
                             if not self._running:
                                 return
                             self._process_event(event)
-                    except BlockingIOError:
+                    except (BlockingIOError, InterruptedError):
                         continue
+                    except (OSError, Exception) as dev_err:
+                        # Device disconnected (e.g. input-remapper reloaded or USB unplugged)
+                        dev_name = getattr(device, "name", "unknown")
+                        dev_path = getattr(device, "path", "?")
+                        print(f"evdev: device disconnected on '{dev_name}' ({dev_path}): {dev_err}")
+                        self._remove_device(device)
 
-        except OSError:
-            pass  # device closed during shutdown
         except Exception as e:
             print(f"evdev loop error: {e}")
+        finally:
+            # Guaranteed fail-safe ungrab: If the loop exits for any reason,
+            # ensure all devices are ungrabbed so user input is never frozen
+            self._emergency_ungrab_all()
 
     def _process_event(self, event):
         """Handle a single input event: intercept Ctrl+Numpad, forward everything else."""
@@ -1021,10 +1188,41 @@ class HotkeyManager:
                     self._trigger(button_id)
                 consumed = True  # swallow down, repeat, and release
 
-        # Forward everything we didn't consume (including SYN, LED, etc.)
-        if not consumed:
-            with self._ev_lock:
-                self._ev_uinput.write_event(event)
+        # Forward everything we didn't consume (including SYN, LED, mouse events, etc.)
+        if not consumed and self._ev_uinput:
+            try:
+                with self._ev_lock:
+                    self._ev_uinput.write_event(event)
+            except (OSError, Exception):
+                # Ignore transient write errors on individual events
+                pass
+
+    def _emergency_ungrab_all(self):
+        """Emergency release of all devices to ensure keyboard/mouse are never locked."""
+        with self._dev_lock:
+            if self._ev_selector:
+                try:
+                    self._ev_selector.close()
+                except Exception:
+                    pass
+                self._ev_selector = None
+            for dev in list(self._ev_devices):
+                try:
+                    dev.ungrab()
+                except Exception:
+                    pass
+                try:
+                    dev.close()
+                except Exception:
+                    pass
+            self._ev_devices.clear()
+            if self._ev_uinput:
+                try:
+                    with self._ev_lock:
+                        self._ev_uinput.close()
+                except Exception:
+                    pass
+                self._ev_uinput = None
 
     def _stop_evdev(self):
         # Signal thread to exit and wait for it to finish
@@ -1032,32 +1230,7 @@ class HotkeyManager:
         if self._ev_thread and self._ev_thread.is_alive():
             self._ev_thread.join(timeout=1.0)
         self._ev_thread = None
-        
-        # Close selector
-        if self._ev_selector:
-            try:
-                self._ev_selector.close()
-            except Exception:
-                pass
-            self._ev_selector = None
-        # Ungrab and close all grabbed devices
-        for dev in self._ev_devices:
-            try:
-                dev.ungrab()
-            except Exception:
-                pass
-            try:
-                dev.close()
-            except Exception:
-                pass
-        self._ev_devices.clear()
-        # Close virtual keyboard
-        if self._ev_uinput:
-            try:
-                self._ev_uinput.close()
-            except Exception:
-                pass
-            self._ev_uinput = None
+        self._emergency_ungrab_all()
 
     # ─── pynput backend (Windows / fallback) ────────────────────────────
 
@@ -1274,7 +1447,7 @@ class DeviceSelectionDialog(QDialog):
             for device_path in evdev.list_devices():
                 try:
                     dev = evdev.InputDevice(device_path)
-                    if dev.name == HotkeyManager.UINPUT_NAME:
+                    if _is_our_virtual_device(dev.name):
                         dev.close()
                         continue
                     caps = dev.capabilities(verbose=False)
@@ -1283,7 +1456,9 @@ class DeviceSelectionDialog(QDialog):
                     has_ctrl = bool(key_caps & _EV_CTRL_CODES)
                     has_wasd = bool(key_caps & set(_EV_WASD_KEYS.values()))
                     if has_numpad or has_ctrl or has_wasd:
-                        devices.append((device_path, dev.name))
+                        is_virt = _is_virtual_device(dev.name)
+                        tag = "[Virtual] " if is_virt else "[Hardware] "
+                        devices.append((device_path, f"{tag}{dev.name} ({device_path})"))
                     dev.close()
                 except Exception:
                     pass
@@ -1540,6 +1715,10 @@ class MainWindow(QMainWindow):
         self.hotkey_mgr.start()
         # Update input status after hotkey manager starts (evdev may grab devices asynchronously)
         QTimer.singleShot(250, self._update_input_status)
+        # Periodic input status & watchdog timer (checks health and updates device status)
+        self._watchdog_timer = QTimer(self)
+        self._watchdog_timer.timeout.connect(self._watchdog_check)
+        self._watchdog_timer.start(1000)
 
     def _build_ui(self):
         central = QWidget()
@@ -1801,15 +1980,29 @@ class MainWindow(QMainWindow):
                 self.current_items_per_row = new_items
                 self._reflow_grid()
 
+    def _watchdog_check(self):
+        """Heartbeat monitor: keeps status updated and recovers from unexpected backend stalls."""
+        if hasattr(self, "hotkey_mgr") and self.hotkey_mgr:
+            if not self.hotkey_mgr.is_healthy():
+                print("Watchdog: HotkeyManager backend stalled. Restarting...")
+                self.hotkey_mgr.restart_evdev()
+            self._update_input_status()
+
     def _update_input_status(self):
         mgr = self.hotkey_mgr
         status = None
         evdev_available = False
         pynput_available = False
 
-        if platform.system() == "Linux" and hasattr(mgr, "_ev_devices") and mgr._ev_devices:
-            status = f"evdev: grabbed {len(mgr._ev_devices)} device(s)"
-            evdev_available = True
+        if platform.system() == "Linux" and hasattr(mgr, "_ev_devices"):
+            with mgr._dev_lock:
+                count = len(mgr._ev_devices)
+            if count > 0:
+                status = f"evdev: grabbed {count} device(s)"
+                evdev_available = True
+            elif mgr._running and HAS_EVDEV:
+                status = "evdev: scanning for devices..."
+                evdev_available = True
 
         if hasattr(mgr, "_pynput_listener") and mgr._pynput_listener:
             pynput_available = True
@@ -2286,15 +2479,12 @@ class MainWindow(QMainWindow):
         # Only show for Linux with evdev active
         if platform.system() != "Linux" or not HAS_EVDEV:
             return
-        if not (hasattr(mgr, "_ev_devices") and mgr._ev_devices):
-            return
         dialog = DeviceSelectionDialog(mgr, self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             selected = dialog.get_selected_paths()
             mgr.set_selected_device_paths(selected)
-            # Restart hotkey manager
-            mgr.stop()
-            mgr.start()
+            # Restart hotkey manager cleanly
+            mgr.restart_evdev()
             self._update_input_status()
 
     # ── Hover info ──
@@ -2942,24 +3132,28 @@ def check_and_elevate_if_needed():
     if os.geteuid() == 0:
         return  # Already elevated
     
-    # Check if we have permission to access input devices
+    # Check if we have permission to access input devices and uinput
     try:
-        # Try to open an input device to test permissions
         devices = evdev.list_devices()
         if not devices:
             return  # No devices to test
         
-        # Try opening and grabbing a device
-        test_dev = evdev.InputDevice(devices[0])
-        try:
-            test_dev.grab()
-            test_dev.ungrab()
-            test_dev.close()
+        has_accessible_dev = False
+        for path in devices:
+            try:
+                test_dev = evdev.InputDevice(path)
+                test_dev.close()
+                has_accessible_dev = True
+                break
+            except PermissionError:
+                continue
+            except Exception:
+                continue
+
+        uinput_accessible = os.access("/dev/uinput", os.W_OK)
+
+        if has_accessible_dev and uinput_accessible:
             return  # We have permissions, no need to elevate
-        except (OSError, PermissionError):
-            test_dev.close()
-            # Need elevation - relaunch with pkexec
-            pass
     except (PermissionError, OSError):
         pass  # Need elevation
     
@@ -3001,8 +3195,24 @@ def check_and_elevate_if_needed():
 
 
 def main():
+    import signal
     check_and_elevate_if_needed()
     app = App()
+
+    def _sig_handler(signum, frame):
+        if hasattr(app, "main_win") and app.main_win:
+            try:
+                app.main_win.close()
+            except Exception:
+                pass
+        sys.exit(0)
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            signal.signal(sig, _sig_handler)
+        except Exception:
+            pass
+
     sys.exit(app.run())
 
 
