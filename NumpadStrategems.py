@@ -36,7 +36,7 @@ from dataclasses import dataclass, field
 from typing import Optional, Dict, List, Tuple
 
 # Version
-VERSION = "0.2.1"
+VERSION = "0.2.2"
 GITHUB_REPO = "EatPrilosec/NumpadStrategems"
 
 # ─── Third-party imports ────────────────────────────────────────────────────
@@ -848,9 +848,9 @@ class HotkeyManager:
         self._ev_lock = threading.Lock()     # lock for uinput writes
         self._dev_lock = threading.Lock()    # lock for device list / selector operations
         self._ev_thread = None
+        self._hotplug_thread = None
         self._ev_selector = None
         self._ev_ctrl_down = set()
-        self._ev_last_scan_time = 0.0
         self._last_heartbeat = time.time()
 
         # pynput state (Windows)
@@ -1025,9 +1025,12 @@ class HotkeyManager:
                 return False
 
             self._last_heartbeat = time.time()
-            self._ev_last_scan_time = time.time()
             self._ev_thread = threading.Thread(target=self._evdev_loop, daemon=True)
             self._ev_thread.start()
+
+            # Dedicated background hotplug scanner (never blocks real-time reading)
+            self._hotplug_thread = threading.Thread(target=self._hotplug_loop, daemon=True)
+            self._hotplug_thread.start()
             return True
 
         except PermissionError:
@@ -1059,7 +1062,7 @@ class HotkeyManager:
             if device in self._ev_devices:
                 self._ev_devices.remove(device)
 
-    def _add_device(self, dev) -> bool:
+    def _add_device(self, dev, verbose: bool = False) -> bool:
         """Safely grab and register a newly connected device."""
         with self._dev_lock:
             try:
@@ -1072,15 +1075,34 @@ class HotkeyManager:
                     self._create_uinput(self._ev_devices)
                 return True
             except Exception as e:
-                print(f"evdev: failed to grab dynamic device '{dev.name}': {e}")
+                # Suppress repeated EBUSY spam when background hotplug checks devices held by other daemons
+                if verbose or not (isinstance(e, OSError) and getattr(e, "errno", None) == 16):
+                    print(f"evdev: skipped dynamic device '{dev.name}': {e}")
                 try:
                     dev.close()
                 except Exception:
                     pass
                 return False
 
+    def _hotplug_loop(self):
+        """Dedicated background thread for device discovery without interrupting event reading."""
+        while self._running:
+            # Sleep in short intervals (2.0s total) for responsive exit
+            for _ in range(20):
+                if not self._running:
+                    return
+                time.sleep(0.1)
+
+            if not self._running or platform.system() != "Linux" or not HAS_EVDEV:
+                return
+
+            try:
+                self._check_for_new_devices()
+            except Exception:
+                pass
+
     def _check_for_new_devices(self):
-        """Scans for newly added or reconnected devices (e.g. input-remapper restarts)."""
+        """Scans for newly added or reconnected devices (runs exclusively on background hotplug thread)."""
         if not self._running or platform.system() != "Linux" or not HAS_EVDEV:
             return
         try:
@@ -1121,23 +1143,17 @@ class HotkeyManager:
             pass
 
     def _evdev_loop(self):
-        """Read events from ALL grabbed devices and forward non-intercepted ones."""
+        """Dedicated tight event loop: reads events with zero blocking and forwards them."""
         try:
             while self._running:
                 self._last_heartbeat = time.time()
-
-                # Periodic hotplug & remapper auto-reconnect check (every ~1.5s)
-                now = time.time()
-                if now - self._ev_last_scan_time > 1.5:
-                    self._ev_last_scan_time = now
-                    self._check_for_new_devices()
 
                 with self._dev_lock:
                     selector = self._ev_selector
                     has_devices = bool(self._ev_devices)
 
                 if not selector or not has_devices:
-                    time.sleep(0.2)
+                    time.sleep(0.1)
                     continue
 
                 try:
@@ -1148,10 +1164,7 @@ class HotkeyManager:
                 for key, _mask in events:
                     device = key.fileobj
                     try:
-                        for event in device.read():
-                            if not self._running:
-                                return
-                            self._process_event(event)
+                        raw_events = list(device.read())
                     except (BlockingIOError, InterruptedError):
                         continue
                     except (OSError, Exception) as dev_err:
@@ -1160,6 +1173,12 @@ class HotkeyManager:
                         dev_path = getattr(device, "path", "?")
                         print(f"evdev: device disconnected on '{dev_name}' ({dev_path}): {dev_err}")
                         self._remove_device(device)
+                        continue
+
+                    if not self._running or not raw_events:
+                        continue
+
+                    self._handle_events(raw_events)
 
         except Exception as e:
             print(f"evdev loop error: {e}")
@@ -1168,31 +1187,37 @@ class HotkeyManager:
             # ensure all devices are ungrabbed so user input is never frozen
             self._emergency_ungrab_all()
 
-    def _process_event(self, event):
-        """Handle a single input event: intercept Ctrl+Numpad, forward everything else."""
-        consumed = False
+    def _handle_events(self, raw_events):
+        """Process a batch of events with minimal overhead."""
+        to_forward = []
+        for event in raw_events:
+            consumed = False
 
-        if event.type == ec.EV_KEY:
-            # Track Ctrl state
-            if event.code in _EV_CTRL_CODES:
-                if event.value != 0:
-                    self._ev_ctrl_down.add(event.code)
-                else:
-                    self._ev_ctrl_down.discard(event.code)
-                self.ctrl_pressed = bool(self._ev_ctrl_down)
+            if event.type == ec.EV_KEY:
+                # Track Ctrl state
+                if event.code in _EV_CTRL_CODES:
+                    if event.value != 0:
+                        self._ev_ctrl_down.add(event.code)
+                    else:
+                        self._ev_ctrl_down.discard(event.code)
+                    self.ctrl_pressed = bool(self._ev_ctrl_down)
 
-            # Intercept ALL Ctrl+Numpad events (down, repeat, release)
-            elif self.ctrl_pressed and event.code in _EV_NUMPAD_MAP:
-                if event.value == 1:  # key down → trigger strategem
-                    button_id = _EV_NUMPAD_MAP[event.code]
-                    self._trigger(button_id)
-                consumed = True  # swallow down, repeat, and release
+                # Intercept ALL Ctrl+Numpad events (down, repeat, release)
+                elif self.ctrl_pressed and event.code in _EV_NUMPAD_MAP:
+                    if event.value == 1:  # key down → trigger strategem
+                        button_id = _EV_NUMPAD_MAP[event.code]
+                        self._trigger(button_id)
+                    consumed = True  # swallow down, repeat, and release
 
-        # Forward everything we didn't consume (including SYN, LED, mouse events, etc.)
-        if not consumed and self._ev_uinput:
+            # Forward everything we didn't consume (including SYN, LED, mouse movement, etc.)
+            if not consumed:
+                to_forward.append(event)
+
+        if to_forward and self._ev_uinput:
             try:
                 with self._ev_lock:
-                    self._ev_uinput.write_event(event)
+                    for ev in to_forward:
+                        self._ev_uinput.write_event(ev)
             except (OSError, Exception):
                 # Ignore transient write errors on individual events
                 pass
@@ -1228,8 +1253,11 @@ class HotkeyManager:
         # Signal thread to exit and wait for it to finish
         self._running = False
         if self._ev_thread and self._ev_thread.is_alive():
-            self._ev_thread.join(timeout=1.0)
+            self._ev_thread.join(timeout=0.5)
         self._ev_thread = None
+        if self._hotplug_thread and self._hotplug_thread.is_alive():
+            self._hotplug_thread.join(timeout=0.5)
+        self._hotplug_thread = None
         self._emergency_ungrab_all()
 
     # ─── pynput backend (Windows / fallback) ────────────────────────────
@@ -1379,11 +1407,12 @@ class DeviceSelectionDialog(QDialog):
         self.device_checkboxes: Dict[str, QCheckBox] = {}
         self.setWindowTitle("Select Input Devices")
         self.setStyleSheet(f"background-color: {DARK_BG}; color: white;")
-        self.setMinimumWidth(400)
+        self.setMinimumSize(640, 460)
+        self.resize(700, 500)
         
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(8)
+        layout.setSpacing(10)
         
         # Instructions
         instr = QLabel("Select which input devices to use for global hotkeys:")
